@@ -1,0 +1,1000 @@
+---
+title: "Assessment of Normalization Methods for TCGA Data"
+author: "Yannick Dueren, Johannes Lederer, Li-Xuan Qin"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+# abstract: "TODO: This is the abstract."
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "results") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Setup
+
+The settings list `settings` configure which parts, simulations, and analysis steps of this R markdown are executed. This way single components of the analysis can be disabled for the purpose of saving computation time. Setting `settings$all` to `TRUE` will set all other options to true regardless of their value.
+
+```{r analysis.settings}
+settings <- list(
+  # If true sets all other settings to TRUE
+  all=F,
+  # Generate interactive plots of co-expression structures
+  investigate.coexpression=F,
+  # Perform Differential Expression Analysis
+  perform.DEA=T,
+  # Generate paper figures
+  generate.paper.figs=T,
+  # Specify if paper figures are exported
+  export.figures = T,
+  # Path for file exports
+  paper.fig.path = "../../danawriteup/figs/",
+  # Clears environment
+  debug=TRUE
+)
+if(settings$all) {
+  settings$investigate.coexpression=TRUE
+  settings$perform.DEA=TRUE
+  settings$generate.paper.figs=TRUE
+}
+if(settings$debug) rm(list=ls()[ls()!="settings"])
+```
+
+
+## Parameter configuration
+
+The `config` list contains all parameters for the analysis.
+Remember to *always set the working directory* and the paths to the data/external files prior to running the code.
+
+```{r configuration}
+config <- list(
+  # working directory
+  working.dir = "C:/Users/Yannick/Google Drive/projects/normalization/paperSupplement",
+  DANA.path = "./R/DANA.R",
+  
+  ## Data
+  case.name = "TCGA",
+  # Read count data file for the full data set
+  data.file.path = "data/TCGA_harmonized_BRCA_UCS.RData",
+  # RData file for coordinates data frame based on miRBase miRNA definitions
+  coords.file.path = "data/miRBase.coords.RData",
+  
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = TRUE,
+  
+  # thresholds for zero-expressed, poorly-expressed and well-expressed genes 
+  t.zero = 2,  # zero-expressed in [0, t.zero)
+  t.poor = 5,  # poorly-expressed in [t.zero, t.well]
+  t.well = 100,  # well-expressed in [t.well, inf)
+  # distance threshold for clustering
+  cluster.threshold = 10000,
+  # preprocessing data transformation type: none ("n"), modified log2 ("log2"),
+  # or cube root ("cube") available
+  preprocess.transform = "log2",
+  
+  ## Correlation Estimation for positive and negative controls
+  # Available methods | Tuning parameter calibration schemes
+  # "mb"              | "cv", "aic", "bic", "av"
+  # "huge.mb"         | "ric", "stars"
+  # "glasso"          | "ric", "stars", "ebic"
+  # "fastggm"         | none
+  # "pearson"         | none
+  # "spearman"        | none
+  
+  # Positive Controls
+  corr.method.pos = "mb",
+  tuning.criterion.pos = "bic",
+  # Negative Controls
+  corr.method.neg = "pearson",
+  tuning.criterion.neg = "",
+  # Generate plots within DANA
+  generate.plots = FALSE
+)
+```
+
+Configuration for the differential expression analysis
+
+```{r configuration.DEA}
+config.DEA <- list(
+  ## Data
+  case.name = "TCGA",
+
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = FALSE,
+  
+  # Significance level for DEA
+  alpha = 0.01,
+  # Plots
+  generate.volcano.plot = TRUE,
+  generate.meanvar.plot = TRUE,
+  # Use q-values (adjusted p-values) instead of p-values
+  q.values = FALSE,
+  # RUV reduces the parameter size. Reduce DEA result to RUV genes?
+  perform.subsetting = FALSE
+)
+```
+
+## Load Packages
+
+Load all required R libraries/packages.
+
+```{r load.packages, results='hide', message=FALSE}
+# Set working directory
+setwd(config$working.dir)
+# DANA functions
+source(config$DANA.path)
+# Libraries
+library(openxlsx)  # read excel files
+library(corrplot) # For mixed correlation plots
+library(cowplot) # Arrange plots
+library(RColorBrewer) # Colors
+library(latex2exp) # for latex in axis labels 
+library(ggcorrplot) # ggplot2 correlation plots
+```
+
+
+
+
+# Load Data
+
+## Load the dataset under study
+
+We load the data set into memory.
+
+```{r load.data.set}
+# Load the p x n matrix of read counts into the workspace
+load(config$data.file.path)
+
+# Unlist the data
+data.BRCA <- TCGA.BRCA.UCS$BRCA
+data.UCS <- TCGA.BRCA.UCS$UCS
+
+# Transform gene names to lower case
+rownames(data.BRCA)  <- tolower(rownames(data.BRCA))
+rownames(data.UCS) <- tolower(rownames(data.UCS))
+
+# Build single RC matrix
+data.RC <- data.TCGA <- cbind(data.BRCA, data.UCS) 
+data.groups <- c(rep("BRCA", dim(data.BRCA)[2]), rep("UCS", dim(data.UCS)[2]))
+
+# Inspect
+cat("Dimensions of the data: ", dim(data.RC), "\n")
+```
+
+## miRNA Coordinates
+
+
+### Load corresponding miRNA chromosome coordinates
+
+A coordinates data frame that specifies the base pair location of each miRNA of the data set on the chromosomes is loaded.
+
+```{r load.tcga.coords.data.frame}
+# Load miRNA chromosome location coordinates data frame
+load(config$coords.file.path)
+coords <- coords  # change according to the name of the loaded data matrix
+```
+
+
+### Remove genes that cannot be found in the coordinates data frame
+
+Some miRNAs map to multiple locations of sequence families. We named the sequence family with a parenthesis that reflects the number of members from all the different genomic locations (e.g. hsa-let-7a(3)). These miRNAs cannot be uniquely mapped to the genome, therefore we must exclude these from the location based analysis.
+
+```{r remove.genes.not.in.coords}
+# only consider genes that are present in the coordinate data frame
+genes.in.coords <- rownames(coords)[na.omit(match(rownames(data.RC), rownames(coords)))]
+cat(dim(data.RC)[1]-length(genes.in.coords), " genes not found in coords. Reducing data set to ", length(genes.in.coords), "genes.\n")
+# test data set
+data.RC <- data.RC[genes.in.coords, ]
+# benchmark data set
+genes <- rownames(data.RC)
+rm(genes.in.coords)
+```
+
+
+
+## Examine the Data
+
+First, we investigate the distribution of mean miRNA expression of the data.
+
+```{r miRNA.expressions}
+# Histogram plot test data set
+par(mfrow=c(1,1))
+df <- data.frame(log.expression=log2(rowMeans(data.RC)+1))
+print(ggplot(df, aes(x=log.expression)) + 
+        geom_histogram(binwidth = .1, color="black", fill="black") +
+        geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+        ggtitle("Test data set"))
+rm(df)
+```
+
+We observe that there is a large proportion of poorly-expressed genes. Some of them have extremely low or zero mean expression which corresponds to essentially zero reads.
+
+
+
+# DANA - Performance Analysis of Normalization Methods
+
+We apply the full analysis pipeline to the data set. This includes:
+
+1. Apply the normalization methods to the raw counts.
+2. Define positive and negative controls based on read counts.
+3. Estimate the level of coexpression between miRNAs for each data set.
+4. Compare positive and negative controls before and after normalization.
+
+
+The following parameters are used:
+
+* Case name: `r config$case.name`
+* Control definition:
+  - Definition of negative controls, read count in [`r config$t.zero`, `r config$t.poor`]
+  - Definition of positive controls, read count in [`r config$t.well`, inf]
+  - Distance threshold for clustering: `r config$cluster.threshold`
+* Data preprocessing transformation: `r config$preprocess.transform`
+* Coexpression estimation:
+  - Correlation estimation method for positive controls: `r config$corr.method.pos`
+  - Correlation estimation tuning parameter calibration method for positive controls: `r config$tuning.criterion.pos`
+* Comparison statistics:
+  - Generate plots? `r config$generate.plots`
+
+```{r data.full.pipeline.normPA}
+genes <- rownames(data.RC)
+
+## Apply Normalization
+data.norm <- normalize(data.RC,
+                       groups=data.groups,
+                       name=config$case.name,
+                       apply.TC=config$norm.apply.TC,
+                       apply.UQ=config$norm.apply.UQ,
+                       apply.med=config$norm.apply.med,
+                       apply.TMM=config$norm.apply.TMM,
+                       apply.DESeq=config$norm.apply.DESeq,
+                       apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                       apply.QN=config$norm.apply.QN,
+                       apply.RUV=config$norm.apply.RUV)
+
+## Define Controls
+pre.res <- define.controls(data.RC,
+                           t.zero=config$t.zero,
+                           t.poor=config$t.poor,
+                           t.well=config$t.well,
+                           t.cluster=config$cluster.threshold,
+                           coords=coords,
+                           clusters=NULL)
+pos.controls <- pre.res$genes.pos
+neg.controls <- pre.res$genes.neg
+clusters <- pre.res$clusters
+clusters.data <- clusters
+
+
+# Apply DANA pipeline
+DANA.results <- DANA(data.RC=data.RC, 
+                     data.norm=data.norm, 
+                     pos.controls=pos.controls, 
+                     neg.controls=neg.controls, 
+                     clusters=clusters.data,
+                     coords=coords,
+                     case.name="benchmark",
+                     generate.plots=config$generate.plots,
+                     preprocess.transform=config$preprocess.transform,
+                     corr.method.pos=config$corr.method.pos,
+                     tuning.criterion.pos=config$tuning.criterion.pos,
+                     corr.method.neg=config$corr.method.neg,
+                     tuning.criterion.neg=config$tuning.criterion.neg) 
+
+if(!config$generate.plots) {
+  stargazer(DANA.results$metrics, type="text", summary=FALSE, digits=4, 
+            title="Comparison statistics for the TCGA-BRCA/UCS data set", align=TRUE)
+}
+iplot.data.noNorm <- iggplot.corr(DANA.results$data.model$pos$corr, clusters=clusters, title="Positive controls (un-normalized)", coords=coords)
+iplot.data.TMM <- iggplot.corr(DANA.results$norm.models$TCGA.TMM$pos$corr, clusters=clusters, title="Positive controls (TMM)", coords=coords)
+```
+
+
+## Investigate Co-expression Structures
+
+We compare the estimated co-expression structures for the test and benchmark dataset. Here, we take a look at the models for the un-normalized data as well as TMM-normalized data. Note that you cannot directly compare the graphs of benchmark with test data since the considered set of genes is not identical.
+
+```{r investigate.coexpression}
+if(settings$investigate.coexpression) {
+  htmltools::tagList(list(iplot.data.noNorm, iplot.data.TMM))  # show plots in markdown
+}
+```
+
+
+
+# Differential Expression Analysis
+
+
+## Normalize Data
+
+```{r DEA.normalize.data}
+if(settings$perform.DEA) {
+  ## Reset data
+  data.RC <- data.TCGA 
+  
+  ## Normalize test Data
+  data.norm <- normalize(data.RC,
+                         groups=data.groups,
+                         name="TCGA",
+                         apply.TC=config.DEA$norm.apply.TC,
+                         apply.UQ=config.DEA$norm.apply.UQ,
+                         apply.med=config.DEA$norm.apply.med,
+                         apply.TMM=config.DEA$norm.apply.TMM,
+                         apply.DESeq=config.DEA$norm.apply.DESeq,
+                         apply.PoissonSeq=config.DEA$norm.apply.PoissonSeq,
+                         apply.QN=config.DEA$norm.apply.QN,
+                         apply.RUV=FALSE)
+  # RUV normalization
+  if(config.DEA$norm.apply.RUV) {
+    data.norm.RUV.adjust <- list(test.RUVr=norm.RUV(data.RC, data.groups, "RUVr")$adjust.factor,
+                                 test.RUVs=norm.RUV(data.RC, data.groups, "RUVs")$adjust.factor,
+                                 test.RUVg=norm.RUV(data.RC, data.groups, "RUVg")$adjust.factor)
+  }
+
+}
+```
+
+
+
+## Test DEA
+
+```{r DEA.test}
+if(settings$perform.DEA) {
+  ## Perform DEA on full dataset
+  test.DEA <- DE.voom(data.RC=data.RC, groups=data.groups, plot=config.DEA$generate.meanvar.plot, plot.title="Un-normalized")
+  if(config.DEA$generate.volcano.plot) plot.DE.volcano(test.DEA, alpha=config.DEA$alpha, q.values=config.DEA$q.values, title="Un-normalized")
+  
+  ## DEA for normalized test data
+  data.norm.DEA <- list()
+  for(i in 1:length(data.norm)) {
+    data.norm.DEA <- 
+      append(data.norm.DEA, list(DE.voom(data.RC=data.norm[[i]], 
+                                         groups=data.groups, 
+                                         plot=config.DEA$generate.meanvar.plot,
+                                         plot.title=names(data.norm)[i])))
+    if(config.DEA$generate.volcano.plot) {
+      plot.DE.volcano(data.norm.DEA[[i]], 
+                      alpha=config.DEA$alpha, 
+                      q.values=config.DEA$q.values, 
+                      title=names(data.norm)[i])
+    }
+  }
+  ## DEA for RUV normalization
+  if(config.DEA$norm.apply.RUV) {
+    for(i in 1:length(data.norm.RUV.adjust)) {
+      data.norm.DEA <- 
+        append(data.norm.DEA, list(DE.voom(data.RC=data.RC, 
+                                           groups=data.groups, 
+                                           plot=config.DEA$generate.meanvar.plot,
+                                           plot.title=names(data.norm.RUV.adjust)[i],
+                                           adjust=data.norm.RUV.adjust[[i]])))
+      if(config.DEA$generate.volcano.plot) {
+        plot.DE.volcano(data.norm.DEA[[i]], 
+                        alpha=config.DEA$alpha, 
+                        q.values=config.DEA$q.values, 
+                        title=names(data.norm.RUV.adjust)[i])
+      }
+    }
+    names(data.norm.DEA) <- c(names(data.norm), names(data.norm.RUV.adjust))
+  } else {
+    names(data.norm.DEA) <- names(data.norm)
+  }
+}
+```
+
+
+# Results and Figures for Paper
+
+## Number of samples, markers, and positive and negative controls
+
+```{r generate.paper.figs.data.inspection}
+if(settings$generate.paper.figs) {
+  
+# Dimension of data after analysis
+cat("Data:\n")
+cat("  - Dimensions: p=", dim(data.RC)[1],", n=", dim(data.RC)[2], "\n", sep="")
+cat("  - Positive controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.well, ", inf ]\n", sep="")
+cat("    * Number of positive controls miRNAs:", length(pos.controls), "\n")
+cat("  - Negative controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.zero, ",", config$t.poor, "]\n")
+cat("    * Number of negative controls miRNAs:", length(neg.controls), "\n")
+
+}
+```
+
+
+## Read Count Distribution in the Data
+
+### Per Data-Set
+
+```{r generate.paper.figs.RC.distribution}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # Histogram plot test data set
+  data.RC.log2 <- log2(rowMeans(data.RC)+1)
+  df <- data.frame(log.expression=data.RC.log2)
+  p.data.RC.hist <- ggplot(df, aes(x=log.expression)) + 
+    geom_histogram(binwidth = .1, color="black", fill="black") +
+    geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+    geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+    ggtitle("TCGA-BRCA/UCS data set") +
+    theme_classic()
+  print(p.data.RC.hist)
+
+  
+  p.RC.hist <- ggplot(df) + 
+    theme_classic() +
+    geom_histogram(aes(x=log.expression, y=..count..), binwidth = .1) +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="#E7298A",  linetype="longdash") +
+    geom_segment(aes(x = log2(config$t.zero+1), y = 600, xend = log2(config$t.poor+1), yend = 600),
+                 arrow=arrow(length=unit(.07, "in"), ends="both"),
+                 color="#5851b8") +
+    annotate(geom="label", x=(log2(config$t.zero+1)+log2(config$t.poor+1))/2.0, y=630,
+             label="neg. contr.", color="#5851b8", size=4, fill = alpha(c("white"),0.85), label.size = NA) +
+    geom_segment(aes(x = log2(config$t.well+1), y = 600, xend = log2(config$t.well+1)+4, yend = 600),
+                 arrow=arrow(length=unit(.07, "in"), ends="last"),
+                 color="#E7298A") +
+    annotate(geom="label", x=log2(config$t.well+1)+.5, y=630,
+             label="pos. contr.", color="#E7298A", size=4, hjust=0, fill = alpha(c("white"),0.85), label.size = NA) +
+    xlab("Mean") +
+    ylab("Frequency")
+  print(p.RC.hist)
+  
+    ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_RC_Distribution.pdf"), p.RC.hist, width=5, height=4, device="pdf")
+  }
+  
+}
+```
+
+
+
+
+## Mean-Variance Plot
+
+### Distribution property among technical replicates
+
+```{r generate.paper.figs.mean.variance.plot1}
+if(settings$generate.paper.figs) {
+  # Function for mean-variance plot for a given data set
+  mean.variance.plot <- function(data.RC, title, axis.limit=NULL) {
+    df <- data.frame(data.mean=log10(rowMeans(data.RC) + 1),
+                     data.var =log10(rowVars(data.RC) + 1))
+    lin.fit <- lm(df$data.var ~ df$data.mean)$coefficients
+    p <- ggplot(df,aes(x=data.mean,y=data.var)) + 
+      geom_point(alpha=.25) + 
+      xlab("log10(Mean)") + 
+      ylab("log10(Variance)") + 
+      geom_abline(intercept = lin.fit[1], slope = lin.fit[2], color="red", linetype="longdash", size=1) +
+      geom_abline(intercept = 0, slope = 1, colour="blue") +
+      annotate("text", alpha=1, x=4, y=0.5, hjust=0, vjust=0, size=3, colour="red",
+               label=paste0("log10(Variance) = ", round(lin.fit[1],2), " + ", round(lin.fit[2],2), "*log10(Mean)")) + 
+      xlim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ylim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ggtitle(title) +
+      theme(aspect.ratio=1, plot.title = element_text(hjust = 0.5)) +
+      theme_bw()
+    return(p)
+  }
+  
+  # Both subtypes
+  p.meanvar <- mean.variance.plot(data.RC, "Full data set", axis.limit=12.5)
+  print(p.meanvar)
+  # BRCA
+  p.meanvar.BRCA <- mean.variance.plot(data.RC[, data.groups=="BRCA"], "BRCA", axis.limit=12.5)
+  print(p.meanvar.BRCA)
+  # UCS
+  p.meanvar.UCS <- mean.variance.plot(data.RC[, data.groups=="UCS"], "UCS", axis.limit=12.5)
+  print(p.meanvar.UCS)
+}
+```
+
+### Marker-specific sd vs mean
+
+```{r generate.paper.figs.mean.variance.plot2}
+if(settings$generate.paper.figs) {
+  
+  # Both subtypes
+  p.meansd <- plot.mean.sd(data.RC, config$t.zero, config$t.poor, config$t.well, "Full data set")
+  print(p.meansd)
+  # BRCA
+  p.meansd.BRCA <- plot.mean.sd(data.RC[, data.groups=="BRCA"], config$t.zero, config$t.poor, config$t.well, "BRCA")
+  print(p.meansd.BRCA)
+  # UCS
+  p.meansd.UCS <- plot.mean.sd(data.RC[, data.groups=="UCS"], config$t.zero, config$t.poor, config$t.well, "UCS")
+  print(p.meansd.UCS)
+  
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_MeanSD.pdf"), p.meansd + labs(title = NULL), width = 5, height=4, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Plots
+
+```{r generate.paper.figs.correlation}
+if(settings$generate.paper.figs) {
+  num.genes.plot.pos <- 60
+  num.genes.plot.neg <- 60
+
+  # Co-expression models
+  data.model <- DANA.results$data.model
+  data.norm.model <- DANA.results$norm.models$TCGA.DESeq
+  
+  # Common control miRNAs
+  pos.controls <- rownames(data.model$pos$corr)
+  pos.controls.norm <- rownames(data.norm.model$pos$corr)
+  pos.controls.common <- intersect(pos.controls, pos.controls.norm)
+  neg.controls <- rownames(data.model$neg$corr)
+  neg.controls.norm <- rownames(data.norm.model$neg$corr)
+  # reduce the number of genes for the plot
+  num.genes.plot.pos <- min(num.genes.plot.pos, length(pos.controls.common))
+  pos.controls.plot <- pos.controls.common[1:num.genes.plot.pos]
+  
+  num.genes.plot.neg <- min(num.genes.plot.neg,
+                            dim(data.model$neg$corr)[1],
+                            dim(data.norm.model$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.data.pos <- data.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.data.DESeq.pos <- data.norm.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.data.neg <- data.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.data.DESeq.neg <- data.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  
+  ## Generate plots
+  # Positive controls
+  p.corr.pos <- ggplot.corr(corr.data.pos, 
+                                 clusters=clusters, 
+                                 threshold=0, 
+                                 title="Un-normalized",
+                                 coords=coords)
+  p.corr.pos.DESeq <- ggplot.corr(corr.data.DESeq.pos, 
+                                     clusters=clusters, 
+                                     threshold=0, 
+                                     title="DESeq",
+                                     coords=coords)
+  
+  
+  p.corr.pos.two <- arrangeGrob(p.corr.pos.DESeq + theme(legend.position="none"),
+                                p.corr.pos + theme(legend.position="none"),
+                                get.legend(p.corr.pos.DESeq + theme(legend.position = "bottom")),
+                                layout_matrix=rbind(c(1,2), c(4,4)),
+                                heights = c(5,1))
+  grid.arrange(p.corr.pos.two)  # plot
+  
+  # Negative controls
+  p.corr.neg <- ggplot.corr(corr.data.neg, 
+                            clusters=clusters, 
+                            threshold=0, 
+                            title="Un-normalized")
+  p.corr.neg.DESeq <- ggplot.corr(corr.data.DESeq.neg, 
+                                clusters=clusters, 
+                                threshold=0, 
+                                title="DESeq")
+  
+  p.corr.neg.two <- arrangeGrob(p.corr.neg.DESeq + theme(legend.position="none"),
+                                p.corr.neg + theme(legend.position="none"),
+                                get.legend(p.corr.neg.DESeq + theme(legend.position = "bottom")),
+                                layout_matrix=rbind(c(1,2), c(4,4)),
+                                heights = c(5,1))
+  grid.arrange(p.corr.neg.two)  # plot
+  
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_CorrPos_DESeq.pdf"), p.corr.pos.two, width = 5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_CorrNeg_DESeq.pdf"), p.corr.neg.two, width = 5, height=3.5, device="pdf")
+  }
+}
+```
+
+
+### All normalization methods
+
+```{r generate.paper.figs.correlation.all}
+if(settings$generate.paper.figs) { 
+  p.corr.noNorm <- ggplot.corr(DANA.results$data.model$pos$corr,
+                             clusters=clusters,
+                             title="un-normalized")
+  p.corr.TMM <- ggplot.corr(DANA.results$norm.models$TCGA.TMM$pos$corr,
+                            clusters=clusters,
+                            title="TMM")
+  p.corr.DESeq <- ggplot.corr(DANA.results$norm.models$TCGA.DESeq$pos$corr,
+                              clusters=clusters,
+                              title="DESeq")
+  p.corr.PoissonSeq <- ggplot.corr(DANA.results$norm.models$TCGA.PoissonSeq$pos$corr,
+                                   clusters=clusters,
+                                   title="PoissonSeq")
+  p.corr.TC <- ggplot.corr(DANA.results$norm.models$TCGA.TC$pos$corr,
+                           clusters=clusters,
+                           title="TC")
+  p.corr.Med <- ggplot.corr(DANA.results$norm.models$TCGA.Med$pos$corr,
+                            clusters=clusters,
+                            title="Med")
+  p.corr.RUVg <- ggplot.corr(DANA.results$norm.models$TCGA.RUVg$pos$corr,
+                             clusters=clusters,
+                             title="RUVg")
+  p.corr.RUVs <- ggplot.corr(DANA.results$norm.models$TCGA.RUVs$pos$corr,
+                             clusters=clusters,
+                             title="RUVs")
+  p.corr.RUVr <- ggplot.corr(DANA.results$norm.models$TCGA.RUVr$pos$corr,
+                             clusters=clusters,
+                             title="RUVr")
+  p.corr.UQ <- ggplot.corr(DANA.results$norm.models$TCGA.UQ$pos$corr,
+                           clusters=clusters,
+                           title="UQ")
+  p.corr.QN <- ggplot.corr(DANA.results$norm.models$TCGA.QN$pos$corr,
+                           clusters=clusters,
+                           title="QN")
+  
+  # Arrange plots
+  p.corr.all <-
+    plot_grid(p.corr.noNorm + theme(legend.position="none"),
+              p.corr.TMM + theme(legend.position="none"),
+              p.corr.DESeq + theme(legend.position="none"),
+              p.corr.PoissonSeq + theme(legend.position="none"),
+              p.corr.TC + theme(legend.position="none"),
+              p.corr.Med + theme(legend.position="none"),
+              p.corr.RUVg + theme(legend.position="none"),
+              p.corr.RUVs + theme(legend.position="none"),
+              p.corr.RUVr + theme(legend.position="none"),
+              p.corr.UQ + theme(legend.position="none"),
+              p.corr.QN + theme(legend.position="none"),
+              get.legend(p.corr.noNorm + theme(legend.position = "bottom")),
+              ncol=3)
+  plot(p.corr.all)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_Corr_All.pdf"), p.corr.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Frequency Plots
+
+### Subset for paper
+
+
+```{r generate.paper.figs.corr.density}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  model <- DANA.results$data.model
+  norm.model1 <- DANA.results$norm.models$TCGA.DESeq
+  norm.model2 <- DANA.results$norm.models$TCGA.RUVs
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(model$neg$corr)[1],
+                            dim(norm.model1$neg$corr)[1],
+                            dim(norm.model2$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.neg <- model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.norm1.neg <- norm.model1$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.norm2.neg <- norm.model2$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  ## extract non-zero correlations
+  nnz.corr.neg <- corr.neg[upper.tri(corr.neg)]
+  nnz.corr.neg <- nnz.corr.neg[nnz.corr.neg != 0]
+  nnz.corr.norm1.neg <- corr.norm1.neg[upper.tri(corr.norm1.neg)]
+  nnz.corr.norm1.neg <- nnz.corr.norm1.neg[nnz.corr.norm1.neg != 0]
+  nnz.corr.norm2.neg <- corr.norm2.neg[upper.tri(corr.norm2.neg)]
+  nnz.corr.norm2.neg <- nnz.corr.norm2.neg[nnz.corr.norm2.neg != 0]
+  
+  # Keep positive correlations
+  nnz.corr.neg <- nnz.corr.neg[nnz.corr.neg > 0]
+  nnz.corr.norm1.neg <- nnz.corr.norm1.neg[nnz.corr.norm1.neg > 0]
+  nnz.corr.norm2.neg <- nnz.corr.norm2.neg[nnz.corr.norm2.neg > 0]
+
+  
+  ## direct comparison of negative controls un-normalized vs. DESeq vs. RUVs
+  neg.corr <- data.frame(
+    control=factor(c(rep("Un-normalized", length(nnz.corr.neg)),
+                     rep("DESeq", length(nnz.corr.norm1.neg)),
+                     rep("RUVs", length(nnz.corr.norm2.neg)))),
+    corr=abs(c(nnz.corr.neg, nnz.corr.norm1.neg, nnz.corr.norm2.neg))
+    )
+  # ttt <- data.frame(prop.table(table(method=neg.corr$control, corr=neg.corr$corr), 1))
+  
+  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    # scale_linetype_manual(values=c("twodash", "solid", "solid", "solid"))+
+    scale_color_manual(values=c('#e7298a','#1B9E77','#D95F02')) + # First colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.9,0.86), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation")#+ ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq)
+  
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_CorrDensityNeg_Freq.pdf"), p.density.neg.nnz.freq, width = 5, height=4, device="pdf")
+  }
+}
+```
+
+
+### All methods
+
+
+```{r generate.paper.figs.corr.density.supplements}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  model <- DANA.results$data.model
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(model$neg$corr)[1],
+                            sapply(DANA.results$norm.models, function(x) dim(x$neg$corr)[1]))
+  
+  # Subsetted correlation matrices
+  corr.neg <- model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.norm.neg <- lapply(DANA.results$norm.models, function(x) x$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg])
+  
+  ## Strictly positive correlations
+  nnz.corr.neg <- corr.neg[upper.tri(corr.neg)]
+  nnz.corr.neg <- nnz.corr.neg[nnz.corr.neg > 0]
+  nnz.corr.norm.neg <- lapply(corr.norm.neg, function(x) x[upper.tri(x)][x[upper.tri(x)] > 0])
+  names(nnz.corr.norm.neg) <- substr(names(nnz.corr.norm.neg), 6, 20)
+  
+  control <- c(rep("un-normalized", length(nnz.corr.neg)))
+  for(i in 1:length(nnz.corr.norm.neg)) {
+    control <- c(control, rep(names(nnz.corr.norm.neg)[i], length(nnz.corr.norm.neg[[i]])))
+  }
+  ## direct comparison of negative controls
+  neg.corr <- data.frame(
+    control=factor(control),
+    corr=abs(c(nnz.corr.neg, unname(unlist(nnz.corr.norm.neg))))
+    )
+  
+  p.corr.frequency.neg.controls.all <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.9, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    scale_color_manual(values=brewer.pal(n=12, name="Paired")) + # First 2 colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.85,0.6), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") + # ggtitle("Positive correlation among negative controls") + 
+    theme(legend.key.width = unit(2,"cm"))
+  print(p.corr.frequency.neg.controls.all)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_CorrDensityNeg_Freq_All.pdf"), p.corr.frequency.neg.controls.all, width = 8, height=5, device="pdf")
+  }
+}
+```
+
+
+## Correlation Scatter Plots
+
+### Subset for paper
+
+```{r generate.paper.figs.corr.scatter}
+if(settings$generate.paper.figs) {
+  ## Generate correlation scatter plots for positive controls for TMM and UQ
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs RUVr
+  p.scatter.RUVr <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.RUVr$pos$corr,
+    clusters=clusters.data,
+    title="RUVr Normalization",
+    xlab="un-normalized", 
+    ylab="RUVr", 
+    threshold=0)
+  print(p.scatter.RUVr)
+  # un-normalized vs Med
+  p.scatter.Med <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.Med$pos$corr,
+    clusters=clusters.data,
+    title="Med Normalization",
+    xlab="un-normalized", 
+    ylab="Med", 
+    threshold=0)
+  print(p.scatter.Med)
+  
+  # Save plots
+  if(settings$export.figures) {
+    # ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_ScatterRUVr.pdf"), p.scatter.RUVr, width=4, height=4, device="pdf")
+    # ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_ScatterMed.pdf"), p.scatter.Med, width=4, height=4, device="pdf")
+  }
+}
+```
+
+### All normalization methods for supplementary materials
+
+```{r generate.paper.figs.corr.scatter.all}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs TMM
+  p.scatter.TMM <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.TMM$pos$corr,
+    clusters=clusters, title="TMM", xlab="un-normalized", ylab="TMM", 
+    ccc=round(DANA.results$metrics["TCGA.TMM", "cc"],3))
+  # un-normalized vs DESeq
+  p.scatter.DESeq <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.DESeq$pos$corr,
+    clusters=clusters, title="DESeq", xlab="un-normalized", ylab="DESeq", 
+    ccc=round(DANA.results$metrics["TCGA.DESeq", "cc"],3))
+  # un-normalized vs PoissonSeq
+  p.scatter.PoissonSeq <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.PoissonSeq$pos$corr,
+    clusters=clusters, title="PoissonSeq", xlab="un-normalized", ylab="PoissonSeq", 
+    ccc=round(DANA.results$metrics["TCGA.PoissonSeq", "cc"],3))
+  # un-normalized vs TC
+  p.scatter.TC <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.TC$pos$corr,
+    clusters=clusters, title="TC", xlab="un-normalized", ylab="TC", 
+    ccc=round(DANA.results$metrics["TCGA.TC", "cc"],3))
+  # un-normalized vs Med
+  p.scatter.Med <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.Med$pos$corr,
+    clusters=clusters, title="Med", xlab="un-normalized", ylab="Med", 
+    ccc=round(DANA.results$metrics["TCGA.Med", "cc"],3))
+  # un-normalized vs RUVg
+  p.scatter.RUVg <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.RUVg$pos$corr,
+    clusters=clusters, title="RUVg", xlab="un-normalized", ylab="RUVg", 
+    ccc=round(DANA.results$metrics["TCGA.RUVg", "cc"],3))
+  # un-normalized vs RUVs
+  p.scatter.RUVs <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.RUVs$pos$corr,
+    clusters=clusters, title="RUVs", xlab="un-normalized", ylab="RUVs", 
+    ccc=round(DANA.results$metrics["TCGA.RUVs", "cc"],3))
+  # un-normalized vs RUVr
+  p.scatter.RUVr <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.RUVr$pos$corr,
+    clusters=clusters, title="RUVr", xlab="un-normalized", ylab="RUVr", 
+    ccc=round(DANA.results$metrics["TCGA.RUVr", "cc"],3))
+  # un-normalized vs UQ
+  p.scatter.UQ <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.UQ$pos$corr,
+    clusters=clusters, title="UQ", xlab="un-normalized", ylab="UQ", 
+    ccc=round(DANA.results$metrics["TCGA.UQ", "cc"],3))
+  # un-normalized vs QN
+  p.scatter.QN <- plot.corr.scatter(
+    corr1=DANA.results$data.model$pos$corr, 
+    corr2=DANA.results$norm.models$TCGA.QN$pos$corr,
+    clusters=clusters, title="QN", xlab="un-normalized", ylab="QN", 
+    ccc=round(DANA.results$metrics["TCGA.QN", "cc"],3))
+  
+  p.scatter.TCGA.all <- plot_grid(p.scatter.TMM,
+                                  p.scatter.DESeq,
+                                  p.scatter.PoissonSeq,
+                                  p.scatter.TC,
+                                  p.scatter.Med,
+                                  p.scatter.RUVg,
+                                  p.scatter.RUVs,
+                                  p.scatter.RUVr,
+                                  p.scatter.UQ,
+                                  p.scatter.QN,
+                                  ncol = 3,
+                                  align="hv")
+  plot(p.scatter.TCGA.all)
+  
+  
+  # Save plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_Scatter_All.pdf"), p.scatter.TCGA.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+
+## DANA Result Metrics
+
+
+```{r generate.paper.figs.result.metrics}
+if(settings$generate.paper.figs) { 
+  options(scipen=4) # force non-scientific notation of x axis
+  
+  test.DANA.metrics <- data.frame(
+    method=substr(rownames(DANA.results$metrics), 6, 20),
+    cc=DANA.results$metrics[, "cc"],
+    mcr=DANA.results$metrics[, "mcr"]
+  )
+  
+  p.DANA.metrics <- ggplot(test.DANA.metrics,aes(x=mcr,y=cc, label=method)) + 
+    geom_point(alpha=.5) +
+    theme_classic() + 
+    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    ylab(TeX("$cc^+$; Biological signal preservation")) + 
+    geom_text_repel(aes(label = method), size=3) +
+    # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
+    scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
+                       breaks = scales::pretty_breaks(n = 5)) +
+    # ylim(c(0,1)) 
+    scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.DANA.metrics)
+  
+  print("DANA Statistics for the TCGA-BRCA/UCS")
+  test.DANA.metrics$cc <- round(test.DANA.metrics$cc,3)
+  test.DANA.metrics$mcr <- round(test.DANA.metrics$mcr,3)
+  print(test.DANA.metrics)
+  
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "BRCA_UCS_DANAMetrics.pdf"), p.DANA.metrics, width=4.5, height=3.5, device="pdf")
+  }
+  
+}
+```
+
+
+
+
+
+
+
+
+# Package Information
+
+```{r session.info}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

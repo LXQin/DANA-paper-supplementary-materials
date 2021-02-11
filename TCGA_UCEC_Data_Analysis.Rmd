@@ -1,0 +1,1512 @@
+---
+title: "Assessment of Normalization Methods for TCGA-UCEC Data"
+author: "Yannick Dueren, Johannes Lederer, Li-Xuan Qin"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+# abstract: "TODO: This is the abstract."
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "results") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Setup
+
+The settings list `settings` configure which parts, simulations, and analysis steps of this R markdown are executed. This way single components of the analysis can be disabled for the purpose of saving computation time. Setting `settings$all` to `TRUE` will set all other options to true regardless of their value.
+
+```{r analysis.settings}
+settings <- list(
+  # If true sets all other settings to TRUE
+  all=F,
+  # Application of the full DANA pipeline to the benchmark data
+  bench.DANA=T,
+  # Application of the full DANA pipeline to the test data
+  test.DANA=T,
+  # Generate interactive plots of co-expression structures
+  investigate.coexpression=F,
+  # Perform Differential Expression Analysis for test and benchmark data sets
+  perform.DEA=T,
+  # Generate paper figures
+  generate.paper.figs=T,
+  # Specify if paper figures are exported
+  export.figures = T,
+  # Path for file exports
+  paper.fig.path = "../../danawriteup/figs/",
+  # Clears environment
+  debug=TRUE
+)
+if(settings$all) {
+  settings$bench.DANA=TRUE
+  settings$test.DANA=TRUE
+  settings$investigate.coexpression=TRUE
+  settings$generate.paper.figs=TRUE
+}
+if(settings$generate.paper.figs) {
+  settings$bench.DANA=TRUE
+  settings$test.DANA=TRUE
+}
+if(settings$debug) rm(list=ls()[ls()!="settings"])
+```
+
+
+## Parameter configuration
+
+The `config` list contains all parameters for the analysis.
+Remember to *always set the working directory* and the paths to the data/external files prior to running the code.
+
+```{r configuration}
+config <- list(
+  # working directory
+  working.dir = "C:/Users/Yannick/Google Drive/projects/normalization/paperSupplement",
+  DANA.path = "./R/DANA.R",
+  
+  ## Data
+  case.name = "UCEC",
+  # Read count data file for the full UCEC data set
+  data.file.path = "data/TCGA_harmonized_UCEC.RData",
+  # RData file for coordinates data frame based on miRBase miRNA definitions
+  coords.file.path = "data/miRBase.coords.RData",
+  
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = TRUE,
+  
+  # thresholds for zero-expressed, poorly-expressed and well-expressed genes 
+  t.zero = 2,  # zero-expressed in [0, t.zero)
+  t.poor = 5,  # poorly-expressed in [t.zero, t.well]
+  t.well = 2^6,  # well-expressed in [t.well, inf)
+  # distance threshold for clustering
+  cluster.threshold = 10000,
+  # preprocessing data transformation type: none ("n"), modified log2 ("log2"),
+  # or cube root ("cube") available
+  preprocess.transform = "log2",
+  
+  ## Correlation Estimation for positive and negative controls
+  # Available methods | Tuning parameter calibration schemes
+  # "mb"              | "cv", "aic", "bic", "av"
+  # "huge.mb"         | "ric", "stars"
+  # "glasso"          | "ric", "stars", "ebic"
+  # "fastggm"         | none
+  # "pearson"         | none
+  # "spearman"        | none
+  
+  # Positive Controls
+  corr.method.pos = "mb",
+  tuning.criterion.pos = "bic",
+  # Negative Controls
+  corr.method.neg = "pearson",
+  tuning.criterion.neg = "",
+  # Generate plots within DANA
+  generate.plots = FALSE  # generate comparison plots
+)
+```
+
+Configuration for the differential expression analysis
+
+```{r configuration.DEA}
+config.DEA <- list(
+  ## Data
+  case.name = "UCEC",
+
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = TRUE,
+  
+  # Significance level for DEA
+  alpha = 0.01,
+  # Plots
+  generate.volcano.plot = TRUE,
+  generate.meanvar.plot = TRUE,
+  # Use q-values (adjusted p-values) instead of p-values
+  q.values = FALSE,
+  # RUV reduces the parameter size. Reduce DEA result to RUV genes?
+  perform.subsetting = FALSE
+)
+```
+
+## Load Packages
+
+Load all required R libraries/packages.
+
+```{r load.packages, results='hide', message=FALSE}
+# Set working directory
+setwd(config$working.dir)
+# DANA functions
+source(config$DANA.path)
+# Libraries
+library(openxlsx)  # read excel files
+library(corrplot) # For mixed correlation plots
+library(cowplot) # Arrange plots
+library(RColorBrewer) # Colors
+library(latex2exp) # for latex in axis labels 
+library(ggcorrplot) # ggplot2 correlation plots
+```
+
+
+
+
+# Load Data
+
+## Load the dataset under study
+
+We load the data set into memory.
+
+```{r load.data.set}
+# Load the p x n matrix of read counts into the workspace
+load(config$data.file.path)
+
+# Unlist the data
+benchmark <- TCGA.UCEC$benchmark
+test <- TCGA.UCEC$test
+benchmark.end <- benchmark$END
+benchmark.ser <- benchmark$SER
+test.end <- test$END
+test.ser <- test$SER
+
+
+# Transform gene names to lower case
+rownames(benchmark.end) <- tolower(rownames(benchmark.end))
+rownames(benchmark.ser) <- tolower(rownames(benchmark.ser))
+rownames(test.end) <- tolower(rownames(test.end))
+rownames(test.ser) <- tolower(rownames(test.ser))
+
+# Rename
+test.RC <- test <- cbind(test.end, test.ser) 
+test.groups <- c(rep("END", dim(test.end)[2]), rep("SER", dim(test.ser)[2]))
+bench.RC <- benchmark <- cbind(benchmark.end, benchmark.ser)  
+bench.groups <- c(rep("END", dim(benchmark.end)[2]), rep("SER", dim(benchmark.ser)[2]))
+
+# Inspect
+cat("Dimensions of test (mixed-batch) data: ", dim(test.RC), "\n")
+cat("Dimensions of benchmark (single-batch) data: ", dim(bench.RC), "\n")
+```
+
+## miRNA Coordinates
+
+
+### Load corresponding miRNA chromosome coordinates
+
+A coordinates data frame that specifies the base pair location of each miRNA of the data set on the chromosomes is loaded.
+
+```{r load.tcga.coords.data.frame}
+# Load miRNA chromosome location coordinates data frame
+load(config$coords.file.path)
+coords <- coords  # change according to the name of the loaded data matrix
+```
+
+
+### Remove genes that cannot be found in the coordinates data frame
+
+Some miRNAs map to multiple locations of sequence families. We named the sequence family with a parenthesis that reflects the number of members from all the different genomic locations (e.g. hsa-let-7a(3)). These miRNAs cannot be uniquely mapped to the genome, therefore we must exclude these from the location based analysis.
+
+```{r remove.genes.not.in.coords}
+# only consider genes that are present in the coordinate data frame
+genes.in.coords <- rownames(coords)[na.omit(match(rownames(test.RC), rownames(coords)))]
+cat(dim(test.RC)[1]-length(genes.in.coords), " genes not found in coords. Reducing data set to ", length(genes.in.coords), "genes.\n")
+# test data set
+test.RC <- test.RC[genes.in.coords, ]
+# benchmark data set
+bench.RC <- bench.RC[genes.in.coords, ]
+genes <- rownames(test.RC)
+rm(genes.in.coords)
+```
+
+
+
+## Examine the Data
+
+First, we investigate the distribution of mean miRNA expression of the data.
+
+```{r miRNA.expressions}
+# Histogram plot test data set
+par(mfrow=c(1,1))
+df <- data.frame(log.expression=log2(rowMeans(test.RC)+1))
+print(ggplot(df, aes(x=log.expression)) + 
+        geom_histogram(binwidth = .1, color="black", fill="black") +
+        geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+        ggtitle("mixed-batch data set"))
+rm(df)
+
+# Histogram plot benchmark data set
+par(mfrow=c(1,1))
+df <- data.frame(log.expression=log2(rowMeans(bench.RC)+1))
+print(ggplot(df, aes(x=log.expression)) + 
+        geom_histogram(binwidth = .1, color="black", fill="black") +
+        geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+        ggtitle("single-batch data set"))
+rm(df)
+```
+
+We observe that there is a large proportion of poorly-expressed genes. Some of them have extremely low or zero mean expression which corresponds to essentially zero reads.
+
+
+
+
+
+
+
+# DANA - Performance Analysis of Normalization Methods
+
+We apply the full analysis pipeline to the data set. This includes:
+
+1. Apply the normalization methods to the raw counts.
+2. Define positive and negative controls based on read counts.
+3. Estimate the level of coexpression between miRNAs for each data set.
+4. Compare positive and negative controls before and after normalization.
+
+
+The following parameters are used:
+
+* Case name: `r config$case.name`
+* Control definition:
+  - Definition of negative controls, read count in [`r config$t.zero`, `r config$t.poor`]
+  - Definition of positive controls, read count in [`r config$t.well`, inf]
+  - Distance threshold for clustering: `r config$cluster.threshold`
+* Data preprocessing transformation: `r config$preprocess.transform`
+* Coexpression estimation:
+  - Correlation estimation method for positive controls: `r config$corr.method.pos`
+  - Correlation estimation tuning parameter calibration method for positive controls: `r config$tuning.criterion.pos`
+* Comparison statistics:
+  - Generate plots? `r config$generate.plots`
+  
+  
+## Benchmark (single-batch) Data Set
+
+```{r bench.full.pipeline}
+if(settings$bench.DANA) {
+  genes <- rownames(bench.RC)
+  
+  ## Apply Normalization
+  data.norm <- normalize(X=bench.RC,
+                         groups=bench.groups,
+                         name="benchmark",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  bench.norm <- data.norm
+  
+  ## Define Controls
+  pre.res <- define.controls(bench.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls <- pre.res$genes.pos
+  pos.controls.bench <- pre.res$genes.pos
+  neg.controls <- pre.res$genes.neg
+  neg.controls.bench <- pre.res$genes.neg
+  clusters <- pre.res$clusters
+  clusters.bench <- clusters
+  
+  # Apply DANA pipeline
+  DANA.bench <- DANA(data.RC=bench.RC, 
+                     data.norm=bench.norm, 
+                     pos.controls=pos.controls.bench, 
+                     neg.controls=neg.controls.bench, 
+                     clusters=clusters.bench,
+                     coords=coords,
+                     case.name="benchmark",
+                     generate.plots=config$generate.plots,
+                     preprocess.transform=config$preprocess.transform,
+                     corr.method.pos=config$corr.method.pos,
+                     tuning.criterion.pos=config$tuning.criterion.pos,
+                     corr.method.neg=config$corr.method.neg,
+                     tuning.criterion.neg=config$tuning.criterion.neg) 
+  
+  if(!config$generate.plots) {
+    stargazer(DANA.bench$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison metrics for the single-batch data set", align=TRUE)
+  }
+  iplot.bench <- iggplot.corr(DANA.bench$data.model$pos$corr, clusters=clusters, title="Single-batch data set - Positive controls (un-normalized)", coords=coords)
+  iplot.bench.TMM <- iggplot.corr(DANA.bench$norm.models$benchmark.TMM$pos$corr, clusters=clusters, title="Single-batch data set - Positive controls (TMM)", coords=coords)
+}
+```
+
+## Test (Mixed-Batch) Data Set
+
+```{r test.full.pipeline}
+if(settings$test.DANA) {
+  genes <- rownames(test.RC)
+  
+  ## Apply Normalization
+  data.norm <- normalize(test.RC,
+                         groups=test.groups,
+                         name="test",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  test.norm <- data.norm
+  
+  # Define Controls  
+  pre.res <- define.controls(test.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls <- pre.res$genes.pos
+  pos.controls.test <- pre.res$genes.pos
+  neg.controls <- pre.res$genes.neg
+  neg.controls.test <- pre.res$genes.neg
+  clusters <- pre.res$clusters
+  clusters.test <- clusters
+  
+  # Apply DANA pipeline
+  DANA.test <- DANA(data.RC=test.RC, 
+                    data.norm=test.norm, 
+                    pos.controls=pos.controls.test, 
+                    neg.controls=neg.controls.test, 
+                    clusters=clusters.test,
+                    coords=coords,
+                    case.name="test",
+                    generate.plots=config$generate.plots,
+                    preprocess.transform=config$preprocess.transform,
+                    corr.method.pos=config$corr.method.pos,
+                    tuning.criterion.pos=config$tuning.criterion.pos,
+                    corr.method.neg=config$corr.method.neg,
+                    tuning.criterion.neg=config$tuning.criterion.neg) 
+  
+  if(!config$generate.plots) {
+    stargazer(DANA.test$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison metrics for the mixed-batch data set", align=TRUE)
+  }
+  iplot.test <- iggplot.corr(DANA.test$data.model$pos$corr, clusters=clusters, title="Mixed-batch data set - Positive controls (un-normalized)", coords=coords)
+  iplot.test.TMM <- iggplot.corr(DANA.test$norm.models$test.TMM$pos$corr, clusters=clusters, title="Mixed-batch data set - Positive controls (TMM)", coords=coords)
+}
+```
+
+
+## Investigate Co-expression Structures
+
+We compare the estimated co-expression structures for the mixed-batch and single-batch dataset. Here, we take a look at the models for the un-normalized data as well as TMM-normalized data. Note that you cannot directly compare the graphs of benchmark with test data since the considered set of genes is not identical.
+
+```{r investigate.coexpression}
+if(settings$investigate.coexpression && settings$bench.DANA && settings$test.DANA) {
+  htmltools::tagList(list(iplot.bench, iplot.bench.TMM, iplot.test, iplot.test.TMM))  # show plots in markdown
+}
+```
+
+
+
+
+
+
+# Differential Expression Analysis
+
+
+## Normalize Data
+
+```{r DEA.normalize.data}
+if(settings$perform.DEA) {
+  ## Reset data
+  test.RC <- test 
+  bench.RC <- benchmark  
+  
+  ## Normalize test Data
+  test.norm <- normalize(test.RC,
+                         groups=test.groups,
+                         name="test",
+                         apply.TC=config.DEA$norm.apply.TC,
+                         apply.UQ=config.DEA$norm.apply.UQ,
+                         apply.med=config.DEA$norm.apply.med,
+                         apply.TMM=config.DEA$norm.apply.TMM,
+                         apply.DESeq=config.DEA$norm.apply.DESeq,
+                         apply.PoissonSeq=config.DEA$norm.apply.PoissonSeq,
+                         apply.QN=config.DEA$norm.apply.QN,
+                         apply.RUV=FALSE)
+  
+  test.norm.RUV.adjust <- list(test.RUVr=norm.RUV(test.RC, test.groups, "RUVr")$adjust.factor,
+                               test.RUVs=norm.RUV(test.RC, test.groups, "RUVs")$adjust.factor,
+                               test.RUVg=norm.RUV(test.RC, test.groups, "RUVg")$adjust.factor)
+}
+```
+
+
+## Benchmark (single-batch) DEA
+
+```{r DEA.benchmark}
+if(settings$perform.DEA) {
+  ## Perform DEA on benchmark dataset
+  bench.DEA <- DE.voom(data.RC=bench.RC, groups=bench.groups, plot=config.DEA$generate.meanvar.plot)
+  if(config.DEA$generate.volcano.plot) plot.DE.volcano(bench.DEA, alpha=config.DEA$alpha, q.values=config.DEA$q.values)
+}
+```
+
+
+## Test (mixed-batch) DEA
+
+```{r DEA.test}
+if(settings$perform.DEA) {
+  ## Perform DEA on full dataset
+  test.DEA <- DE.voom(data.RC=test.RC, groups=test.groups, plot=config.DEA$generate.meanvar.plot, plot.title="test (no norm)")
+  if(config.DEA$generate.volcano.plot) plot.DE.volcano(test.DEA, alpha=config.DEA$alpha, q.values=config.DEA$q.values, title="test (no norm)")
+  
+  ## DEA for normalized test data
+  test.norm.DEA <- list()
+  for(i in 1:length(test.norm)) {
+    test.norm.DEA <- 
+      append(test.norm.DEA, list(DE.voom(data.RC=test.norm[[i]], 
+                                         groups=test.groups, 
+                                         plot=config.DEA$generate.meanvar.plot,
+                                         plot.title=names(test.norm)[i])))
+    if(config.DEA$generate.volcano.plot) {
+      plot.DE.volcano(test.norm.DEA[[i]], 
+                      alpha=config.DEA$alpha, 
+                      q.values=config.DEA$q.values, 
+                      title=names(test.norm)[i])
+    }
+  }
+  ## DEA for RUV normalization
+  for(i in 1:length(test.norm.RUV.adjust)) {
+    test.norm.DEA <- 
+      append(test.norm.DEA, list(DE.voom(data.RC=test.RC, 
+                                         groups=test.groups, 
+                                         plot=config.DEA$generate.meanvar.plot,
+                                         plot.title=names(test.norm.RUV.adjust)[i],
+                                         adjust=test.norm.RUV.adjust[[i]])))
+    if(config.DEA$generate.volcano.plot) {
+      plot.DE.volcano(test.norm.DEA[[i]], 
+                      alpha=config.DEA$alpha, 
+                      q.values=config.DEA$q.values, 
+                      title=names(test.norm.RUV.adjust)[i])
+    }
+  }
+  names(test.norm.DEA) <- c(names(test.norm), names(test.norm.RUV.adjust))
+}
+```
+
+
+
+## Results
+
+```{r DEA.Test.vs.Benchmark}
+if(settings$perform.DEA) {
+  ## Compare test (non-norm) to benchmark
+  test.norm.DEA.stats <- list(test=compare.DEAs(DEA=test.DEA,
+                                           truth.DEA=bench.DEA,
+                                           alpha=config.DEA$alpha))
+  ## Compare normalized test data to benchmark
+  for(i in 1:length(test.norm.DEA)) {
+    test.norm.DEA.stats <- 
+      append(test.norm.DEA.stats, 
+             list(compare.DEAs(DEA=test.norm.DEA[[i]],
+                               truth.DEA=bench.DEA,
+                               alpha=config.DEA$alpha,
+                               subset=switch(config.DEA$perform.subsetting+1,
+                                             NULL,
+                                             rownames(test.norm.DEA[[i]])))))
+  }
+  names(test.norm.DEA.stats) <- c("test.No Norm", names(test.norm.DEA))
+  test.norm.DEA.stats <- test.norm.DEA.stats[1:length(test.norm.DEA.stats)]
+  
+  
+  ## Visualize results
+  
+  # FNR-FDR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             FDR=-sapply(test.norm.DEA.stats, function(x) x$FDR)+1,
+                             FNR=-sapply(test.norm.DEA.stats, function(x) x$FNR)+1)
+  p.test.DEA.FNR.FDR <- ggplot(test.DEA.res, aes(x=FNR, y=FDR, label=method)) +
+      theme_bw() + 
+      geom_point(alpha=1) + 
+      xlab("Sensitivity") + # True positive rate(1-FNR)
+      ylab("Precision") + # Positive predictive value (1-FDR)
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.FNR.FDR)
+  
+  # TPR-FPR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             TPR=sapply(test.norm.DEA.stats, function(x) x$TPR),
+                             FPR=-sapply(test.norm.DEA.stats, function(x) x$FPR)+1)
+  p.test.DEA.TPR.FPR <- ggplot(test.DEA.res, aes(x=TPR, y=FPR, label=method)) + 
+      theme_bw() + 
+      geom_point(alpha=1) + 
+      xlab("TPR") + 
+      ylab("1-FPR") + 
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.TPR.FPR)
+  
+  # CAT Plot
+  d <- append(list("test.No Norm"=test.DEA), test.norm.DEA)
+  names(d) <- substr(names(d), 6, 20)
+  p.test.DEA.CAT <- plot.CAT(DEA=d, 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=50)
+  print(p.test.DEA.CAT)
+  rm(d)
+}
+```
+
+
+
+# Results and Figures for Paper
+
+## Number of samples, markers, and positive and negative controls
+
+```{r generate.paper.figs.data.inspection}
+if(settings$generate.paper.figs) {
+  
+# Dimension of data after analysis
+cat("Mixed-batch data:\n")
+cat("  - Dimensions: p=", dim(test.RC)[1],", n=", dim(test.RC)[2], "\n", sep="")
+cat("  - Positive controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.well, ", inf ]\n", sep="")
+cat("    * Number of positive controls miRNAs:", length(pos.controls.test), "\n")
+cat("  - Negative controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.zero, ",", config$t.poor, "]\n")
+cat("    * Number of negative controls miRNAs:", length(neg.controls.test), "\n")
+
+
+cat("\n\nSingle-batch data:\n")
+cat("  - Dimensions: p=", dim(bench.RC)[1],", n=", dim(bench.RC)[2], "\n", sep="")
+cat("  - Positive controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.well, ", inf ]\n", sep="")
+cat("    * Number of positive controls miRNAs:", length(pos.controls.bench), "\n")
+cat("  - Negative controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.zero, ",", config$t.poor, "]\n")
+cat("    * Number of negative controls miRNAs:", length(neg.controls.bench), "\n")
+
+}
+```
+
+## Read Count Distribution in the Data
+
+### Per Data-Set
+
+```{r generate.paper.figs.RC.distribution}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- log2(rowMeans(test.RC)+1)
+  df <- data.frame(log.expression=test.RC.log2)
+  p.test.RC.hist <- ggplot(df, aes(x=log.expression)) + 
+    geom_histogram(binwidth = .1, color="black", fill="black") +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="9e086c",  linetype="longdash") +
+    ggtitle("Test data set") +
+    theme_classic()
+  print(p.test.RC.hist)
+  rm(df)
+
+  
+  # Histogram plot benchmark data set
+  bench.RC.log2 <- log2(rowMeans(bench.RC)+1)
+  df <- data.frame(log.expression=bench.RC.log2)
+  p.bench.RC.hist <- ggplot(df, aes(x=log.expression)) + 
+    geom_histogram(binwidth = .1, color="black", fill="black") +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="#9e086c",  linetype="longdash") +
+    ggtitle("Benchmark data set") +
+    theme_classic()
+  print(p.bench.RC.hist)
+  rm(df)
+  
+  
+  # Combined read count histogram for test and benchmark data
+  df <- data.frame(bench=bench.RC.log2, test=test.RC.log2)
+  p.RC.hist <- ggplot(df) + 
+    theme_classic() +
+    geom_histogram(aes(x=test, y=..count..,fill="#69b3a2"), binwidth = .1) +
+    geom_histogram(aes(x=bench, y=-..count.., fill="#404080"), binwidth = .1) +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="#E7298A",  linetype="longdash") +
+    geom_segment(aes(x = log2(config$t.zero+1), y = 180, xend = log2(config$t.poor+1), yend = 180),
+                 arrow=arrow(length=unit(.07, "in"), ends="both"),
+                 color="#5851b8") +
+    annotate(geom="label", x=(log2(config$t.zero+1)+log2(config$t.poor+1))/2.0, y=200,
+             label="neg. contr.", color="#5851b8", size=4, fill = alpha(c("white"),0.85), label.size = NA) +
+    geom_segment(aes(x = log2(config$t.well+1), y = 180, xend = 10, yend = 180),
+                 arrow=arrow(length=unit(.07, "in"), ends="last"),
+                 color="#E7298A") +
+    annotate(geom="label", x=log2(config$t.well+1)+.5, y=200,
+             label="pos. contr.", color="#E7298A", size=4, hjust=0, fill = alpha(c("white"),0.85), label.size = NA) +
+    # ylim(c(-90,90)) +
+    scale_fill_manual(name="Data set",values=c("#404080", "#69b3a2"), labels=c("single-batch", "mixed-batch"), guide = guide_legend(reverse=TRUE)) +
+    # ggtitle("log2(Read count + 1)") +
+    theme(legend.position=c(0.86,0.86), 
+          # legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.9))) +
+    scale_y_continuous(breaks=c(-200,-150,-100,-50,0,50,100,150,200), labels=c(200,150,100,50,0,50,100,150,200), limits=c(-200,200)) +
+    xlab("Mean") +
+    ylab("Frequency")
+  print(p.RC.hist)
+  rm(df)
+  
+    ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_RC_Distribution.pdf"), p.RC.hist, width = 5, height=4, device="pdf")
+  }
+  
+}
+```
+
+
+### Group Means comparison between mixed- and single-batch data
+
+```{r generate.paper.figs.RC.comparison}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  ## log2(mean(RC))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- log2(rowMeans(test.RC)+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC)+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch") + 
+    ylab("single-batch") + 
+    ggtitle("log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (END only)
+  test.RC.log2 <- log2(rowMeans(test.RC[, test.groups=="END"])+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC[, bench.groups=="END"])+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.END.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch (END)") + 
+    ylab("single-batch (END)") + 
+    ggtitle(" END  ---  log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.END.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (SER only)
+  test.RC.log2 <- log2(rowMeans(test.RC[, test.groups=="SER"])+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC[, bench.groups=="SER"])+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.SER.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch (SER)") + 
+    ylab("single-batch (SER)") + 
+    ggtitle(" SER  ---  log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.SER.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  
+  
+  ## log2(mean(RC))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- rowMeans(log2(test.RC+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch") + 
+    ylab("single-batch") + 
+    ggtitle("mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (END only)
+  test.RC.log2 <- rowMeans(log2(test.RC[, test.groups=="END"]+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC[, bench.groups=="END"]+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.END.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch (END)") + 
+    ylab("single-batch (END)") + 
+    ggtitle(" END  ---  mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.END.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (SER only)
+  test.RC.log2 <- rowMeans(log2(test.RC[, test.groups=="SER"]+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC[, bench.groups=="SER"]+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.SER.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("mixed-batch (SER)") + 
+    ylab("single-batch (SER)") + 
+    ggtitle(" SER  ---  mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.SER.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+    ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_RC_Comparison_all.pdf"), p.RC.comparison.2, width = 5, height=5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_RC_Comparison_END.pdf"), p.RC.comparison.END.2, width = 5, height=5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_RC_Comparison_SER.pdf"), p.RC.comparison.SER.2, width = 5, height=5, device="pdf")
+  }
+  
+}
+```
+
+
+## Mean-Variance Plot
+
+### Distribution property among technical replicates
+
+```{r generate.paper.figs.mean.variance.plot1}
+if(settings$generate.paper.figs) {
+  # Function for mean-variance plot for a given data set
+  mean.variance.plot <- function(data.RC, title, axis.limit=NULL) {
+    df <- data.frame(data.mean=log10(rowMeans(data.RC) + 1),
+                     data.var =log10(rowVars(data.RC) + 1))
+    lin.fit <- lm(df$data.var ~ df$data.mean)$coefficients
+    p <- ggplot(df,aes(x=data.mean,y=data.var)) + 
+      geom_point(alpha=.25) + 
+      xlab("log10(Mean)") + 
+      ylab("log10(Variance)") + 
+      geom_abline(intercept = lin.fit[1], slope = lin.fit[2], color="red", linetype="longdash", size=1) +
+      geom_abline(intercept = 0, slope = 1, colour="blue") +
+      annotate("text", alpha=1, x=4, y=0.5, hjust=0, vjust=0, size=3, colour="red",
+               label=paste0("log10(Variance) = ", round(lin.fit[1],2), " + ", round(lin.fit[2],2), "*log10(Mean)")) + 
+      xlim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ylim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ggtitle(title) +
+      theme(aspect.ratio=1, plot.title = element_text(hjust = 0.5)) +
+      theme_classic()
+    return(p)
+  }
+  
+  ## Test data
+  # END and SER
+  p.meanvar.test <- mean.variance.plot(test.RC, "Mixed-batch Data", axis.limit=12.5)
+  print(p.meanvar.test)
+  # END (endometrioid)
+  p.meanvar.test.END <- mean.variance.plot(test.RC[, test.groups == "END"], "Mixed-batch Data - END (endometrioid)", axis.limit=12.5)
+  print(p.meanvar.test.END)
+  # SER (serous)
+  p.meanvar.test.SER <- mean.variance.plot(test.RC[, test.groups == "SER"], "Mixed-batch Data - SER (serous)", axis.limit=12.5)
+  print(p.meanvar.test.SER)
+  
+  ## Benchmark data
+  # END and SER
+  p.meanvar.bench <- mean.variance.plot(bench.RC, "Single-batch Data", axis.limit=12.5)
+  print(p.meanvar.bench)
+  # END
+  p.meanvar.bench.END <- mean.variance.plot(bench.RC[, bench.groups == "END"], "Single-batch Data - END (endometrioid)", axis.limit=12.5)
+  print(p.meanvar.bench.END)
+  # SER
+  p.meanvar.bench.SER <- mean.variance.plot(bench.RC[, bench.groups == "SER"], "Single-batch Data - SER (serous)", axis.limit=12.5)
+  print(p.meanvar.bench.SER)
+}
+```
+
+### Marker-specific sd vs mean
+
+```{r generate.paper.figs.mean.variance.plot2}
+if(settings$generate.paper.figs) {
+  
+  ## Mixed-batch data
+  # END and SER
+  p.meanvar.test <- plot.mean.sd(test.RC, config$t.zero, config$t.poor, config$t.well)
+  print(p.meanvar.test)
+  # END (endometrioid)
+  p.meanvar.test.END <- plot.mean.sd(test.RC[, test.groups == "END"], config$t.zero, config$t.poor, config$t.well, "Mixed-batch Data - END (endometrioid)")
+  print(p.meanvar.test.END)
+  # SER
+  p.meanvar.test.SER <- plot.mean.sd(test.RC[, test.groups == "SER"], config$t.zero, config$t.poor, config$t.well, "Mixed-batch Data - SER (serous)")
+  print(p.meanvar.test.SER)
+  
+  ## Single-Batch data
+  # END and SER
+  p.meanvar.bench <- plot.mean.sd(bench.RC, config$t.zero, config$t.poor, config$t.well, "Single-Batch Data")
+  print(p.meanvar.bench)
+  # END (endometrioid)
+  p.meanvar.bench.END <- plot.mean.sd(bench.RC[, bench.groups == "END"], config$t.zero, config$t.poor, config$t.well, "Single-Batch Data - END (endometrioid)")
+  print(p.meanvar.bench.END)
+  # SER
+  p.meanvar.bench.SER <- plot.mean.sd(bench.RC[, bench.groups == "SER"], config$t.zero, config$t.poor, config$t.well, "Single-Batch Data - SER (serous)")
+  print(p.meanvar.bench.SER)
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_Test_MeanSD.pdf"), p.meanvar.test + labs(title = NULL), width = 5, height=4, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Plots
+
+```{r generate.paper.figs.correlation}
+if(settings$generate.paper.figs) {
+  num.genes.plot.pos <- 60
+  num.genes.plot.neg <- 60
+
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  test.model <- DANA.test$data.model
+  test.norm.model <- DANA.test$norm.models$test.TMM
+  
+  # Common control miRNAs
+  pos.controls.bench <- rownames(bench.model$pos$corr)
+  pos.controls.test <- rownames(test.model$pos$corr)
+  pos.controls.common <- intersect(pos.controls.test, pos.controls.bench)
+  neg.controls.bench <- rownames(bench.model$neg$corr)
+  neg.controls.test <- rownames(test.model$neg$corr)
+  # neg.controls.common <- intersect(neg.controls.test, neg.controls.bench)
+  # reduce the number of genes for the plot
+  num.genes.plot.pos <- min(num.genes.plot.pos, length(pos.controls.common))
+  pos.controls.plot <- pos.controls.common[1:num.genes.plot.pos]
+  
+  num.genes.plot.neg <- min(num.genes.plot.neg,
+                            dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.bench.pos <- bench.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.test.pos <- test.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.test.TMM.pos <- test.norm.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.TMM.neg <- test.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  ### Generate plots
+  # Positive controls
+  p.corr.pos.bench <- ggplot.corr(corr.bench.pos, 
+                                  clusters=clusters, 
+                                  threshold=0, 
+                                  title="Single-batch (un-normalized)",
+                                  coords=coords)
+  p.corr.pos.test <- ggplot.corr(corr.test.pos, 
+                                 clusters=clusters, 
+                                 threshold=0, 
+                                 title="Mixed-batch (un-normalized)",
+                                 coords=coords)
+  p.corr.pos.test.TMM <- ggplot.corr(corr.test.TMM.pos, 
+                                     clusters=clusters, 
+                                     threshold=0, 
+                                     title="Mixed-batch (TMM)",
+                                     coords=coords)
+  
+  p.corr.pos <- arrangeGrob(p.corr.pos.bench + theme(legend.position="none"), 
+                            p.corr.pos.test + theme(legend.position="none"),
+                            get.legend(p.corr.pos.bench), 
+                            widths = c(2,2,1))
+  grid.arrange(p.corr.pos)  # plot
+  
+  p.corr.pos.three <- arrangeGrob(p.corr.pos.bench + theme(legend.position="none"), 
+                                  p.corr.pos.test.TMM + theme(legend.position="none"),
+                                  p.corr.pos.test + theme(legend.position="none"),
+                                  get.legend(p.corr.pos.bench + theme(legend.position = "bottom")),
+                                  layout_matrix=rbind(c(1,2,3), c(4,4,4)),
+                                  heights = c(5,1))
+  grid.arrange(p.corr.pos.three)  # plot
+  
+  # Negative controls
+  p.corr.neg.bench <- ggplot.corr(corr.bench.neg, 
+                                  clusters=clusters, 
+                                  threshold=0, 
+                                  title="Single-batch (un-normalized)")
+  p.corr.neg.test <- ggplot.corr(corr.test.neg, 
+                                 clusters=clusters, 
+                                 threshold=0, 
+                                 title="Mixed-batch (un-normalized)")
+  p.corr.neg.test.TMM <- ggplot.corr(corr.test.TMM.neg, 
+                                     clusters=clusters, 
+                                     threshold=0, 
+                                     title="Mixed-batch (TMM)")
+  
+  p.corr.neg <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
+                            p.corr.neg.test + theme(legend.position="none"),
+                            get.legend(p.corr.neg.bench),
+                            widths = c(2,2,1))
+  grid.arrange(p.corr.neg)  # plot
+  
+  
+  p.corr.neg.three <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
+                                  p.corr.neg.test.TMM + theme(legend.position="none"),
+                                  p.corr.neg.test + theme(legend.position="none"),
+                                  get.legend(p.corr.neg.bench + theme(legend.position = "bottom")),
+                                  layout_matrix=rbind(c(1,1,2,2,3,3), c(4,4,4,4,4,4)),
+                                  heights = c(5,1))
+  grid.arrange(p.corr.neg.three)  # plot
+  
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrPos.pdf"), p.corr.pos, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrNeg.pdf"), p.corr.neg, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrPos_TMM.pdf"), p.corr.pos.three, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrNeg_TMM.pdf"), p.corr.neg.three, width = 8, height=3.5, device="pdf")
+  }
+}
+```
+
+### All normalization methods
+
+```{r generate.paper.figs.correlation.all}
+if(settings$generate.paper.figs) { 
+  p.corr.test <- ggplot.corr(DANA.test$data.model$pos$corr,
+                             clusters=clusters,
+                             title="un-normalized")
+  p.corr.bench <- ggplot.corr(DANA.bench$data.model$pos$corr,
+                              clusters=clusters,
+                              title="benchmark data (un-normalized)")
+  p.corr.TMM <- ggplot.corr(DANA.test$norm.models$test.TMM$pos$corr,
+                            clusters=clusters,
+                            title="TMM")
+  p.corr.DESeq <- ggplot.corr(DANA.test$norm.models$test.DESeq$pos$corr,
+                            clusters=clusters,
+                            title="DESeq")
+  p.corr.PoissonSeq <- ggplot.corr(DANA.test$norm.models$test.PoissonSeq$pos$corr,
+                            clusters=clusters,
+                            title="PoissonSeq")
+  p.corr.TC <- ggplot.corr(DANA.test$norm.models$test.TC$pos$corr,
+                            clusters=clusters,
+                            title="TC")
+  p.corr.Med <- ggplot.corr(DANA.test$norm.models$test.Med$pos$corr,
+                            clusters=clusters,
+                            title="Med")
+  p.corr.RUVg <- ggplot.corr(DANA.test$norm.models$test.RUVg$pos$corr,
+                            clusters=clusters,
+                            title="RUVg")
+  p.corr.RUVs <- ggplot.corr(DANA.test$norm.models$test.RUVs$pos$corr,
+                            clusters=clusters,
+                            title="RUVs")
+  p.corr.RUVr <- ggplot.corr(DANA.test$norm.models$test.RUVr$pos$corr,
+                            clusters=clusters,
+                            title="RUVr")
+  p.corr.UQ <- ggplot.corr(DANA.test$norm.models$test.UQ$pos$corr,
+                            clusters=clusters,
+                            title="UQ")
+  p.corr.QN <- ggplot.corr(DANA.test$norm.models$test.QN$pos$corr,
+                            clusters=clusters,
+                            title="QN")
+  
+  # Arrange plots
+  p.corr.test.all <-
+    plot_grid(p.corr.test + theme(legend.position="none"),
+              p.corr.TMM + theme(legend.position="none"),
+              p.corr.DESeq + theme(legend.position="none"),
+              p.corr.PoissonSeq + theme(legend.position="none"),
+              p.corr.TC + theme(legend.position="none"),
+              p.corr.Med + theme(legend.position="none"),
+              p.corr.RUVg + theme(legend.position="none"),
+              p.corr.RUVs + theme(legend.position="none"),
+              p.corr.RUVr + theme(legend.position="none"),
+              p.corr.UQ + theme(legend.position="none"),
+              p.corr.QN + theme(legend.position="none"),
+              get.legend(p.corr.test + theme(legend.position = "bottom")),
+              ncol=3)
+  plot(p.corr.test.all)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_Test_Corr_All.pdf"), p.corr.test.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+## Correlation Frequency Plots
+
+### Subset for paper
+
+```{r generate.paper.figs.corr.density}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  bench.norm.model <- DANA.bench$norm.models$benchmark.TMM
+  test.model <- DANA.test$data.model
+  test.norm.model1 <- DANA.test$norm.models$test.TMM
+  test.norm.model2 <- DANA.test$norm.models$test.TC
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1],
+                            dim(test.norm.model1$neg$corr)[1],
+                            dim(test.norm.model2$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.bench.norm1.neg <- bench.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm1.neg <- test.norm.model1$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm2.neg <- test.norm.model2$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  ## extract non-zero correlations
+  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg != 0]
+  nnz.corr.test.norm1.neg <- corr.test.norm1.neg[upper.tri(corr.test.norm1.neg)]
+  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg != 0]
+  nnz.corr.test.norm2.neg <- corr.test.norm2.neg[upper.tri(corr.test.norm2.neg)]
+  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg != 0]
+  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg != 0]
+  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg != 0]
+  
+  # Keep positive correlations
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
+  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg > 0]
+  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg > 0]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
+  
+
+  
+  ## direct comparison of negative controls benchmark vs test vs test.norm1
+  neg.corr <- data.frame(
+    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
+                     rep("Mixed-batch", length(nnz.corr.test.neg)),
+                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
+    )
+  
+  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    scale_linetype_manual(values=c("solid", "solid", "twodash"))+
+    scale_color_manual(values=c('#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.9,0.9), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") +
+    ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq)
+  
+  
+  ## direct comparison of negative controls Single-batch vs test vs test.norm1 vs test.norm2
+  neg.corr <- data.frame(
+    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
+                     rep("Mixed-batch", length(nnz.corr.test.neg)),
+                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)),
+                     rep("Mixed-batch (TC)", length(nnz.corr.test.norm2.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg, nnz.corr.test.norm2.neg))
+    )
+  # ttt <- data.frame(prop.table(table(method=neg.corr$control, corr=neg.corr$corr), 1))
+  
+  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    # scale_linetype_manual(values=c("twodash", "solid", "solid", "solid"))+
+    scale_color_manual(values=c('#e7298a','#1B9E77','#D95F02', '#7570B3')) + # First colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.9,0.86), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation")#+ ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq)
+  
+  
+  
+  # Additional Plot with normalized Single-batch
+  neg.corr <- data.frame(
+    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
+                     rep("Single-batch (TMM)", length(nnz.corr.bench.norm1.neg)),
+                     rep("Mixed-batch", length(nnz.corr.test.neg)),
+                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.bench.norm1.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
+    )
+  p.density.neg.nnz.freq.four <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=1) +
+    theme_classic() +
+    xlim(0, 1) +
+    theme(legend.position=c(0.9,0.9), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") +
+    scale_linetype_manual(values=c("solid", "twodash","solid", "twodash"))+
+    scale_color_manual(values=c('#1B9E77','#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
+    ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq.four)
+  
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq.pdf"), p.density.neg.nnz.freq, width = 5, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq_WithBench.pdf"), p.density.neg.nnz.freq.four, width = 5, height=4, device="pdf")
+  }
+}
+```
+
+### All methods
+
+
+```{r generate.paper.figs.corr.density.supplements}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  test.model <- DANA.test$data.model
+  test.norm.model1 <- DANA.test$norm.models$test.TMM
+  test.norm.model2 <- DANA.test$norm.models$test.RUVs
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1],
+                            sapply(DANA.test$norm.models, function(x) dim(x$neg$corr)[1]))
+  
+  # Subsetted correlation matrices
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm.neg <- lapply(DANA.test$norm.models, function(x) x$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg])
+  
+  ## Strictly positive correlations
+  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
+  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
+  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
+  nnz.corr.test.norm.neg <- lapply(corr.test.norm.neg, function(x) x[upper.tri(x)][x[upper.tri(x)] > 0])
+  names(nnz.corr.test.norm.neg) <- substr(names(nnz.corr.test.norm.neg), 6, 20)
+  
+  control <- c(rep("Single-batch", length(nnz.corr.bench.neg)), 
+                     rep("Mixed-batch", length(nnz.corr.test.neg)))
+  for(i in 1:length(nnz.corr.test.norm.neg)) {
+    control <- c(control, rep(paste0("Mixed-batch (", names(nnz.corr.test.norm.neg)[i],")"), length(nnz.corr.test.norm.neg[[i]])))
+  }
+  ## direct comparison of negative controls Single-batch vs test vs test.norm1
+  neg.corr <- data.frame(
+    control=factor(control),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, unname(unlist(nnz.corr.test.norm.neg))))
+    )
+  
+  p.corr.frequency.neg.controls.all <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.9, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    scale_color_manual(values=brewer.pal(n=12, name="Paired")) + # First 2 colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.85,0.6), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") + # ggtitle("Positive correlation among negative controls") + 
+    theme(legend.key.width = unit(2,"cm"))
+  print(p.corr.frequency.neg.controls.all)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq_All.pdf"), p.corr.frequency.neg.controls.all, width = 8, height=5, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Scatter Plots
+
+### Subset for paper
+
+```{r generate.paper.figs.corr.scatter}
+if(settings$generate.paper.figs) {
+  ## Generate correlation scatter plots for positive controls for TMM and UQ
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs TMM
+  p.scatter.test.TMM <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TMM$pos$corr,
+    clusters=clusters.test,
+    title="Mixed-batch (TMM)",
+    xlab="un-normalized", 
+    ylab="TMM", 
+    threshold=0)
+  print(p.scatter.test.TMM)
+  # un-normalized vs RUVs
+  p.scatter.test.RUVs <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVs$pos$corr,
+    clusters=clusters.test,
+    title="Mixed-batch (RUVs)",
+    xlab="un-normalized", 
+    ylab="RUVs", 
+    threshold=0)
+  print(p.scatter.test.RUVs)
+  
+  # Save plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_ScatterTMM.pdf"), p.scatter.test.TMM, width=4, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_ScatterRUVs.pdf"), p.scatter.test.RUVs, width=4, height=4, device="pdf")
+    # ggsave(paste0(settings$paper.fig.path, "UCEC_CorrNeg.eps"), p.corr.neg, width = 8, height=3.5, device="eps")
+  }
+}
+```
+
+### All normalization methods for supplementary materials
+
+```{r generate.paper.figs.corr.scatter.all}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs TMM
+  p.scatter.test.TMM <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TMM$pos$corr,
+    clusters=clusters.test, title="TMM", xlab="un-normalized", ylab="TMM", 
+    ccc=round(DANA.test$metrics["test.TMM", "cc"],3))
+  # un-normalized vs DESeq
+  p.scatter.test.DESeq <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.DESeq$pos$corr,
+    clusters=clusters.test, title="DESeq", xlab="un-normalized", ylab="DESeq", 
+    ccc=round(DANA.test$metrics["test.DESeq", "cc"],3))
+  # un-normalized vs PoissonSeq
+  p.scatter.test.PoissonSeq <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.PoissonSeq$pos$corr,
+    clusters=clusters.test, title="PoissonSeq", xlab="un-normalized", ylab="PoissonSeq", 
+    ccc=round(DANA.test$metrics["test.PoissonSeq", "cc"],3))
+  # un-normalized vs TC
+  p.scatter.test.TC <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TC$pos$corr,
+    clusters=clusters.test, title="TC", xlab="un-normalized", ylab="TC", 
+    ccc=round(DANA.test$metrics["test.TC", "cc"],3))
+  # un-normalized vs Med
+  p.scatter.test.Med <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.Med$pos$corr,
+    clusters=clusters.test, title="Med", xlab="un-normalized", ylab="Med", 
+    ccc=round(DANA.test$metrics["test.Med", "cc"],3))
+  # un-normalized vs RUVg
+  p.scatter.test.RUVg <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVg$pos$corr,
+    clusters=clusters.test, title="RUVg", xlab="un-normalized", ylab="RUVg", 
+    ccc=round(DANA.test$metrics["test.RUVg", "cc"],3))
+  # un-normalized vs RUVs
+  p.scatter.test.RUVs <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVs$pos$corr,
+    clusters=clusters.test, title="RUVs", xlab="un-normalized", ylab="RUVs", 
+    ccc=round(DANA.test$metrics["test.RUVs", "cc"],3))
+  # un-normalized vs RUVr
+  p.scatter.test.RUVr <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVr$pos$corr,
+    clusters=clusters.test, title="RUVr", xlab="un-normalized", ylab="RUVr", 
+    ccc=round(DANA.test$metrics["test.RUVr", "cc"],3))
+  # un-normalized vs UQ
+  p.scatter.test.UQ <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.UQ$pos$corr,
+    clusters=clusters.test, title="UQ", xlab="un-normalized", ylab="UQ", 
+    ccc=round(DANA.test$metrics["test.UQ", "cc"],3))
+  # un-normalized vs QN
+  p.scatter.test.QN <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.QN$pos$corr,
+    clusters=clusters.test, title="QN", xlab="un-normalized", ylab="QN", 
+    ccc=round(DANA.test$metrics["test.QN", "cc"],3))
+  
+  p.scatter.test.all <- plot_grid(p.scatter.test.TMM,
+                                  p.scatter.test.DESeq,
+                                  p.scatter.test.PoissonSeq,
+                                  p.scatter.test.TC,
+                                  p.scatter.test.Med,
+                                  p.scatter.test.RUVg,
+                                  p.scatter.test.RUVs,
+                                  p.scatter.test.RUVr,
+                                  p.scatter.test.UQ,
+                                  p.scatter.test.QN,
+                                  ncol = 3,
+                                  align="hv")
+  plot(p.scatter.test.all)
+  
+  
+  # Save plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_Scatter_All.pdf"), p.scatter.test.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+## DANA Result Metrics
+
+
+```{r generate.paper.figs.result.metrics}
+if(settings$generate.paper.figs) { 
+  options(scipen=4) # force non-scientific notation of x axis
+  
+  test.DANA.metrics <- data.frame(
+    method=substr(rownames(DANA.test$metrics), 6, 20),
+    cc=DANA.test$metrics[, "cc"],
+    mcr=DANA.test$metrics[, "mcr"]
+  )
+  
+  p.metrics.test <- ggplot(test.DANA.metrics,aes(x=mcr,y=cc, label=method)) + 
+    geom_point(alpha=.5) +
+    theme_classic() + 
+    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    ylab(TeX("$cc^+$; Biological signal preservation")) + 
+    geom_text_repel(aes(label = method), size=3) +
+    # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
+    scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
+                       breaks = scales::pretty_breaks(n = 5)) +
+    # ylim(c(0,1)) 
+    scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.metrics.test)
+  
+  print("DANA Statistics for mixed-batch data")
+  test.DANA.metrics$cc <- round(test.DANA.metrics$cc,3)
+  test.DANA.metrics$mcr <- round(test.DANA.metrics$mcr,3)
+  print(test.DANA.metrics)
+  
+  
+  bench.DANA.metrics <- data.frame(
+    method=substr(rownames(DANA.bench$metrics), 11, 30),
+    cc=DANA.bench$metrics[, "cc"],
+    mcr=DANA.bench$metrics[, "mcr"]
+  )
+  
+  p.metrics.bench <- ggplot(bench.DANA.metrics, aes(x=mcr, y=cc, label=method)) + 
+    geom_point(alpha=.5) +
+    theme_classic() + 
+    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    ylab(TeX("$cc^+$; Biological signal preservation")) + 
+    geom_text_repel(aes(label = method), size=3) +
+    # xlim(c(min(c(0,bench.mposc.reduction)),max(bench.mposc.reduction))) +
+    scale_x_continuous(labels = scales::percent, limits=c(0, 1.05),
+                       breaks = scales::pretty_breaks(n = 5)) +
+    # ylim(c(0,1))
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) 
+  print(p.metrics.bench)
+  
+  print("DANA Statistics for single-batch data")
+  bench.DANA.metrics$cc <- round(bench.DANA.metrics$cc,3)
+  bench.DANA.metrics$mcr <- round(bench.DANA.metrics$mcr,3)
+  print(bench.DANA.metrics)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_MetricsTest.pdf"), p.metrics.test, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_MetricsBench.pdf"), p.metrics.bench, width=4.5, height=3.5, device="pdf")
+  }
+  
+}
+```
+
+
+## DEA Results
+
+```{r generate.paper.figs.DEA}
+if(settings$generate.paper.figs && settings$perform.DEA) { 
+  # FNR-FDR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             FDR=-sapply(test.norm.DEA.stats, function(x) x$FDR)+1,
+                             FNR=-sapply(test.norm.DEA.stats, function(x) x$FNR)+1)
+  p.test.DEA.FNR.FDR <- ggplot(test.DEA.res, aes(x=FNR, y=FDR, label=method)) +
+      theme_classic() + 
+      geom_point(alpha=1) + 
+      xlab("Sensitivity") + # True positive rate(1-FNR)
+      ylab("Precision") + # Positive predictive value (1-FDR)
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.FNR.FDR)
+  
+  # CAT Plot
+  d <- append(list("test.No Norm"=test.DEA), test.norm.DEA)
+  names(d) <- substr(names(d), 6, 20)
+  p.test.DEA.CAT.1 <- plot.CAT(DEA=d[1:7], 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=100)
+  print(p.test.DEA.CAT.1)
+  p.test.DEA.CAT.2 <- plot.CAT(DEA=d[c(1,8:11)], 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=100)
+  print(p.test.DEA.CAT.2)
+  rm(d)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_DEA_FNR_FDR.pdf"), p.test.DEA.FNR.FDR, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_DEA_CAT.pdf"), p.test.DEA.CAT, width=4.5, height=3.5, device="pdf")
+  }
+}
+```
+
+
+
+
+
+
+
+
+
+# Package Information
+
+```{r session.info}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+

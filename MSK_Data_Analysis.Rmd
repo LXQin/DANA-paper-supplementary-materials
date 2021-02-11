@@ -1,0 +1,2309 @@
+---
+title: "Normalization Performance Analysis for the Paired MSK Data Set"
+author: "Yannick Dueren, Johannes Lederer, Li-Xuan Qin"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+# abstract: "TODO: This is the abstract."
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "results") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Setup
+
+The settings list `settings` configure which parts, simulations, and analysis steps of this R markdown are executed. This way single components of the analysis can be disabled for the purpose of saving computation time. Setting `settings$all` to `TRUE` will set all other options to true regardless of their value.
+
+```{r analysis.settings}
+settings <- list(
+  # If true sets all other settings to TRUE
+  all=F,
+  # Application of the full DANA pipeline to the benchmark data
+  bench.DANA=T,
+  # Application of the full DANA pipeline to the test data
+  test.DANA=T,
+  # Generate interactive plots of co-expression structures
+  investigate.coexpression=F,
+  # Comparison of coexpression estimation methods
+  compare.corr.methods=F,
+  # Full Pipeline comparison of two correlation methods
+  compare.two.methods=F,
+  # Compare DANA results for different cutoff choices
+  compare.cutoffs=T,
+  # Perform Differential Expression Analysis for test and benchmark data sets
+  perform.DEA=T,
+  # Generate paper figures
+  generate.paper.figs=T,
+  # Specify if paper figures are exported
+  export.figures = T,
+  # Path for file exports
+  paper.fig.path = "../../danawriteup/figs/",
+  # Clears environment
+  debug=TRUE
+)
+if(settings$all) {
+  settings$bench.DANA=TRUE
+  settings$test.DANA=TRUE
+  settings$investigate.coexpression=TRUE
+  settings$compare.corr.methods=TRUE
+  settings$compare.two.methods=TRUE
+  settings$generate.paper.figs=TRUE
+}
+if(settings$generate.paper.figs) {
+  settings$bench.DANA=TRUE
+  settings$test.DANA=TRUE
+}
+if(settings$debug) rm(list=ls()[ls()!="settings"])
+```
+
+
+## Parameter configuration
+
+The `config` list contains all parameters for the analysis.
+Remember to *always set the working directory* and the paths to the data/external files prior to running the code.
+
+```{r configuration}
+config <- list(
+  # working directory
+  working.dir = "C:/Users/Yannick/Google Drive/projects/normalization/paperSupplement",
+  DANA.path = "./R/DANA.R",
+  
+  ## Data
+  case.name = "MSK",
+  # Read count data file for the full MSK data set
+  data.file.path = "data/MSKDatasets.RData",
+  # miRNA coordinates (chromosome and base pair location on chromosome)
+  coords.file = "data/coords.msk.RData",
+  # Restrict the analysis to a subtype 
+  # Available: "all", "PMFH", and "MXF"
+  data.subtype = "all",
+  
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = TRUE,
+  
+  # thresholds for zero-expressed, poorly-expressed and well-expressed genes 
+  t.zero = 2,  # zero-expressed in [0, t.zero)
+  t.poor = 10,  # poorly-expressed in [t.zero, t.poor]
+  t.well = 2^7,  # well-expressed in [t.well, inf)
+  # distance threshold for clustering
+  cluster.threshold = 10000,
+  # preprocessing data transformation type: none ("n"), modified log2 ("log2"),
+  # or cube root ("cube") available
+  preprocess.transform = "log2",
+  
+  ## Correlation Estimation for positive and negative controls
+  # Available methods | Tuning parameter calibration schemes
+  # "mb"              | "cv", "aic", "bic", "av"
+  # "huge.mb"         | "ric", "stars"
+  # "glasso"          | "ric", "stars", "ebic"
+  # "fastggm"         | none
+  # "pearson"         | none
+  # "spearman"        | none
+  
+  # Positive Controls
+  corr.method.pos = "mb",
+  tuning.criterion.pos = "bic",
+  # Negative Controls
+  corr.method.neg = "pearson",
+  tuning.criterion.neg = "",
+  # Generate plots within DANA
+  generate.plots = FALSE  # generate comparison plots
+)
+```
+
+
+Configuration for the differential expression analysis
+
+```{r configuration.DEA}
+config.DEA <- list(
+  ## Data
+  case.name = "MSK",
+
+  ## Normalization Methods
+  # Specify which normalization methods will be applied
+  norm.apply.TC = TRUE,
+  norm.apply.UQ = TRUE,
+  norm.apply.med = TRUE,
+  norm.apply.TMM = TRUE,
+  norm.apply.DESeq = TRUE,
+  norm.apply.PoissonSeq = TRUE,
+  norm.apply.QN = TRUE,
+  norm.apply.RUV = TRUE,
+  
+  # Significance level for DEA
+  alpha = 0.01,
+  # Plots
+  generate.volcano.plot = TRUE,
+  generate.meanvar.plot = TRUE,
+  # Use q-values (adjusted p-values) instead of p-values
+  q.values = FALSE,
+  # RUV reduces the parameter size. Reduce DEA result to RUV genes?
+  perform.subsetting = TRUE
+)
+```
+
+
+## Load Packages
+
+Load all required R libraries/packages.
+
+```{r load.packages, results='hide', message=FALSE}
+# Set working directory
+setwd(config$working.dir)
+# DANA functions
+source(config$DANA.path)
+# Libraries
+library(openxlsx)  # read excel files
+library(corrplot) # For mixed correlation plots
+library(cowplot) # Arrange plots
+library(RColorBrewer) # Colors
+library(latex2exp) # for latex in axis labels 
+library(ggcorrplot) # ggplot2 correlation plots
+```
+
+
+
+
+# Load Data
+
+## Load the dataset under study
+
+We load the data set into memory and reduce the set one one subtype (MXF or PMFH) if necessary.
+
+```{r load.data.set}
+# Load the p x n matrix of read counts into the workspace
+load(config$data.file.path)
+# Transform gene names to lower case
+rownames(benchmark) <- tolower(rownames(benchmark))
+rownames(test) <- tolower(rownames(test))
+
+# Rename
+test.RC <- test 
+bench.RC <- benchmark  
+
+# Inspect
+cat("Dimensions of test data: ", dim(test.RC), "\n")
+cat("Dimensions of benchmark data: ", dim(bench.RC), "\n")
+
+# Set sample groups
+groups <- ifelse(substr(colnames(test.RC), 1, 3)=="MXF", "MXF", "PMFH")
+
+## Reduce to subtype
+if(config$data.subtype != "all") {
+  test.RC <- test.RC[, groups == config$data.subtype]
+  bench.RC <- bench.RC[, groups == config$data.subtype]
+  groups <- groups[groups == config$data.subtype]
+}
+```
+
+## miRNA Coordinates
+
+We intend to map all genes in the data to their locations in the genome. Therefore, we build data frames mapping miRNAs to their coordinates on the genome. This coordinate is expressed through chromosome number and base-pair location. 
+
+The data frame `coords` uniquely maps each mature and star miRNA to their respective position on the genome. The name of the `coords` data frame entries corresponds to the mature/star name. The data frame has the following entries:
+
+* loc.index     : Ordering index of all precursors on the genome
+* chr           : The chromosome idnetifier on which the gene is located
+* start         : Number of the first base pair of the miRNA on the chromosome
+* end           : Number of the last base pair of the miRNA on the chromosome
+* corresponding : The name of the corresponding mature or star miRNA, respectively
+
+
+```{r build.coords.data.frame}
+load(config$coords.file)
+```
+
+
+## Remove genes that cannot be found in the coordinates data frame
+
+Some miRNAs map to multiple locations of sequence families. We named the sequence family with a parenthesis that reflects the number of members from all the different genomic locations (e.g. hsa-let-7a(3)). These miRNAs cannot be uniquely mapped to the genome, therefore we must exclude these from the location based analysis.
+
+```{r remove.genes.not.in.coords}
+# only consider genes that are present in the coordinate data frame
+genes.in.coords <- rownames(coords)[na.omit(match(rownames(test.RC), rownames(coords)))]
+cat(dim(test.RC)[1]-length(genes.in.coords), " genes not found in coords. Reducing data set to ", length(genes.in.coords), "genes.\n")
+# test data set
+test.RC <- test.RC[genes.in.coords, ]
+# benchmark data set
+bench.RC <- bench.RC[genes.in.coords, ]
+genes <- rownames(test.RC)
+rm(genes.in.coords)
+```
+
+
+
+
+
+
+## Examine the Data
+
+First, we investigate the distribution of mean miRNA expression of the data.
+
+```{r miRNA.expressions}
+# Histogram plot test data set
+par(mfrow=c(1,1))
+df <- data.frame(log.expression=log2(rowMeans(test.RC)+1))
+print(ggplot(df, aes(x=log.expression)) + 
+        geom_histogram(binwidth = .1, color="black", fill="black") +
+        geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+        ggtitle("Test data set"))
+rm(df)
+
+# Histogram plot benchmark data set
+par(mfrow=c(1,1))
+df <- data.frame(log.expression=log2(rowMeans(bench.RC)+1))
+print(ggplot(df, aes(x=log.expression)) + 
+        geom_histogram(binwidth = .1, color="black", fill="black") +
+        geom_vline(xintercept = log2(config$t.zero+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.poor+1), color="blue", linetype="dashed") +
+        geom_vline(xintercept = log2(config$t.well+1), color="red",  linetype="dashed") +
+        ggtitle("Benchmark data set"))
+rm(df)
+```
+
+We observe that there is a large proportion of poorly-expressed genes. Some of them have extremely low or zero mean expression which corresponds to essentially zero reads.
+
+
+
+
+# Comparison of Coexpression Estimation Methods
+
+```{r compare.coexpression.methods, warning=FALSE}
+if(settings$compare.corr.methods) {
+  ## Preprocessing for test data set
+  genes.test <- rownames(test.RC)
+  
+  # Apply Normalization
+  test.norm <- normalize(test.RC,
+                         groups=groups,
+                         name="test",
+                         apply.TC=T,
+                         apply.UQ=T,
+                         apply.med=T,
+                         apply.TMM=T,
+                         apply.DESeq=T,
+                         apply.PoissonSeq=T,
+                         apply.QN=T,
+                         apply.RUV=T)
+  
+  # Define Controls
+  pre.res <- define.controls(test.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls.test <- pre.res$genes.pos
+  neg.controls.test <- pre.res$genes.neg
+  clusters.test <- pre.res$clusters
+  
+  
+  
+  ## Estimate partial correlations and cc+ metric using DANA
+  
+  # mb (bic)
+  cat("Estimating Models using method: mb.bic\n")
+  DANA.test.mb.bic.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="mb",
+                       tuning.criterion.pos="bic",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="")   
+  
+  # mb(aic)
+  cat("Estimating Models using method: mb.aic\n")
+  DANA.test.mb.aic.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="mb",
+                       tuning.criterion.pos="aic",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="")   
+  
+  # mb (av)
+  cat("Estimating Models using method: mb.av\n")
+  DANA.test.mb.av.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="mb",
+                       tuning.criterion.pos="av",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="")   
+  
+  # mb (cv)
+  cat("Estimating Models using method: mb.cv\n")
+  DANA.test.mb.cv.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="mb",
+                       tuning.criterion.pos="cv",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # glasso (ric)
+  cat("Estimating Models using method: glasso(ric)\n")
+  DANA.test.glasso.ric.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="glasso",
+                       tuning.criterion.pos="ric",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # glasso (stars)
+  cat("Estimating Models using method: glasso(stars)\n")
+  DANA.test.glasso.stars.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="glasso",
+                       tuning.criterion.pos="stars",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # huge.mb (ric)
+  cat("Estimating Models using method: huge.mb.ric\n")
+  DANA.test.huge.mb.ric.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="huge.mb",
+                       tuning.criterion.pos="ric",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # huge.mb (stars)
+  cat("Estimating Models using method: huge.mb.stars\n")
+  DANA.test.huge.mb.stars.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="huge.mb",
+                       tuning.criterion.pos="stars",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # FastGGM
+  cat("Estimating Models using method: fastggm\n")
+  DANA.test.fastggm.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="fastggm",
+                       tuning.criterion.pos="",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # Pearson correlations
+  cat("Estimating Models using method: pearson\n")
+  DANA.test.pearson.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="pearson",
+                       tuning.criterion.pos="",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  # Spearman correlations
+  cat("Estimating Models using method: spearman\n")
+  DANA.test.spearman.res <- DANA(data.RC=test.RC, 
+                       data.norm=test.norm, 
+                       pos.controls=pos.controls.test, 
+                       neg.controls=neg.controls.test, 
+                       clusters=clusters.test,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=F,
+                       preprocess.transform="log2",
+                       corr.method.pos="spearman",
+                       tuning.criterion.pos="",
+                       corr.method.neg="pearson",
+                       tuning.criterion.neg="") 
+  
+  
+  # Fix normalization method names (remove "test." from names)
+  rownames(DANA.test.mb.bic.res$metrics) <- substr(rownames(DANA.test.mb.bic.res$metrics), 6, 20)
+  rownames(DANA.test.mb.aic.res$metrics) <- substr(rownames(DANA.test.mb.aic.res$metrics), 6, 20)
+  rownames(DANA.test.mb.cv.res$metrics) <- substr(rownames(DANA.test.mb.cv.res$metrics), 6, 20)
+  rownames(DANA.test.mb.av.res$metrics) <- substr(rownames(DANA.test.mb.av.res$metrics), 6, 20)
+  rownames(DANA.test.glasso.ric.res$metrics) <- substr(rownames(DANA.test.glasso.ric.res$metrics), 6, 20)
+  rownames(DANA.test.glasso.stars.res$metrics) <- substr(rownames(DANA.test.glasso.stars.res$metrics), 6, 20)
+  rownames(DANA.test.huge.mb.ric.res$metrics) <- substr(rownames(DANA.test.huge.mb.ric.res$metrics), 6, 20)
+  rownames(DANA.test.huge.mb.stars.res$metrics) <- substr(rownames(DANA.test.huge.mb.stars.res$metrics), 6, 20)
+  rownames(DANA.test.fastggm.res$metrics) <- substr(rownames(DANA.test.fastggm.res$metrics), 6, 20)
+  rownames(DANA.test.pearson.res$metrics) <- substr(rownames(DANA.test.pearson.res$metrics), 6, 20)
+  rownames(DANA.test.spearman.res$metrics) <- substr(rownames(DANA.test.spearman.res$metrics), 6, 20)
+  
+  
+  ## Display results
+  par(mfrow=c(1,1))
+  
+  # # Display mean correlation reduction in negative controls
+  # compare.test.mcr <- cbind(DANA.test.mb.bic.res$metrics$mcr,
+  #                           DANA.test.mb.aic.res$metrics$mcr,
+  #                           DANA.test.mb.cv.res$metrics$mcr,
+  #                           DANA.test.mb.av.res$metrics$mcr,
+  #                           DANA.test.glasso.ric.res$metrics$mcr,
+  #                           DANA.test.glasso.stars.res$metrics$mcr,
+  #                           DANA.test.huge.mb.ric.res$metrics$mcr,
+  #                           DANA.test.huge.mb.stars.res$metrics$mcr,
+  #                           DANA.test.fastggm.res$metrics$mcr,
+  #                           DANA.test.pearson.res$metrics$mcr,
+  #                           DANA.test.spearman.res$metrics$mcr)
+  # rownames(compare.test.mcr) <- rownames(DANA.test.mb.bic.res$metrics)
+  # colnames(compare.test.mcr) <- c("mb.bic", "mb.aic", "mb.cv", "mb.av", "glasso.ric", "glasso.stars", "huge.mb.ric", "huge.mb.stars", "fastggm", "pearson", "spearman")
+  # stargazer(compare.test.mcr, type="text", summary=FALSE, digits=5, 
+  #             title="Test data - mcr-", align=TRUE)
+  # corrplot.mixed(cor(compare.test.mcr),lower="circle",upper="number")
+  
+  # Compute correlation of cc+ metric for different estimation methods
+  compare.test.cc <- cbind(DANA.test.mb.bic.res$metrics$cc,
+                           DANA.test.mb.aic.res$metrics$cc,
+                           DANA.test.mb.cv.res$metrics$cc,
+                           DANA.test.mb.av.res$metrics$cc,
+                           DANA.test.glasso.ric.res$metrics$cc,
+                           DANA.test.glasso.stars.res$metrics$cc,
+                           DANA.test.huge.mb.ric.res$metrics$cc,
+                           DANA.test.huge.mb.stars.res$metrics$cc,
+                           DANA.test.fastggm.res$metrics$cc,
+                           DANA.test.pearson.res$metrics$cc,
+                           DANA.test.spearman.res$metrics$cc)
+  rownames(compare.test.cc) <- rownames(DANA.test.mb.bic.res$metrics)
+  colnames(compare.test.cc) <- c("mb.bic", "mb.aic", "mb.cv","mb.av", "glasso.ric", "glasso.stars", "huge.mb.ric", "huge.mb.stars", "fastggm", "pearson", "spearman")
+  stargazer(compare.test.cc, type="text", summary=FALSE, digits=3, 
+              title="Test data - cc+", align=TRUE)
+  corrplot.mixed(cor(compare.test.cc),lower="circle",upper="number")
+  
+  
+  ## Display result statistics plot
+  # MB (bic)
+  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE) + ggtitle("mb (bic)")
+  print(p.test.mb.bic.stats)
+  # MB (aic)
+  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE) + ggtitle("mb (aic)")
+  print(p.test.mb.aic.stats)
+  # MB (cv)
+  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE) + ggtitle("mb (cv)")
+  print(p.test.mb.cv.stats)
+  # MB (av)
+  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE) + ggtitle("mb (av)")
+  print(p.test.mb.av.stats)
+  # glasso (ric)
+  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE) + ggtitle("glasso (ric)")
+  print(p.test.glasso.ric.stats)
+  # glasso (stars)
+  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE) + ggtitle("glasso (stars)")
+  print(p.test.glasso.stars.stats)
+  # huge.mb (ric)
+  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE) + ggtitle("huge.mb (ric)")
+  print(p.test.huge.mb.ric.stats)
+  # huge.mb (stars)
+  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE) + ggtitle("huge.mb (stars)")
+  print(p.test.huge.mb.stars.stats)
+  # FastGGM
+  p.test.fastggm.stats <- plot.DANA.metrics(DANA.test.fastggm.res$metrics, label.repel=TRUE) + ggtitle("FastGGM")
+  print(p.test.fastggm.stats)
+  # Pearson
+  p.test.pearson.stats <- plot.DANA.metrics(DANA.test.pearson.res$metrics, label.repel=TRUE) + ggtitle("Pearson")
+  print(p.test.pearson.stats)
+  # Spearman
+  p.test.spearman.stats <- plot.DANA.metrics(DANA.test.spearman.res$metrics, label.repel=TRUE) + ggtitle("Spearman")
+  print(p.test.spearman.stats)
+
+}
+```
+
+
+
+
+
+# DANA - Performance Analysis of Normalization Methods
+
+We apply the full analysis pipeline to the data set. This includes:
+
+1. Apply the normalization methods to the raw counts.
+2. Define positive and negative controls based on read counts.
+3. Estimate the level of coexpression between miRNAs for each data set.
+4. Compare pos and neg controls before and after normalization.
+
+
+The following parameters are used:
+
+* Case name: `r config$case.name`
+* Control definition:
+  - Definition of negative controls, read count in [`r config$t.zero`, `r config$t.poor`]
+  - Definition of positive controls, read count in [`r config$t.well`, inf]
+  - Distance threshold for clustering: `r config$cluster.threshold`
+* Data preprocessing transformation: `r config$preprocess.transform`
+* Coexpression estimation:
+  - Correlation estimation method for positive controls: `r config$corr.method.pos`
+  - Correlation estimation tuning parameter calibration method for positive controls: `r config$tuning.criterion.pos`
+* Comparison statistics:
+  - Generate plots? `r config$generate.plots`
+  
+  
+## Benchmark Data Set
+
+```{r bench.full.pipeline}
+if(settings$bench.DANA) {
+  genes <- rownames(bench.RC)
+  
+  ## Apply Normalization
+  data.norm <- normalize(X=bench.RC,
+                         groups=groups,
+                         name="benchmark",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  bench.norm <- data.norm
+  
+  ## Define Controls
+  pre.res <- define.controls(bench.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls <- pre.res$genes.pos
+  pos.controls.bench <- pre.res$genes.pos
+  neg.controls <- pre.res$genes.neg
+  neg.controls.bench <- pre.res$genes.neg
+  clusters <- pre.res$clusters
+  clusters.bench <- clusters
+  
+  # Apply DANA pipeline
+  DANA.bench <- DANA(data.RC=bench.RC, 
+                     data.norm=bench.norm, 
+                     pos.controls=pos.controls.bench, 
+                     neg.controls=neg.controls.bench, 
+                     clusters=clusters.bench,
+                     coords=coords,
+                     case.name="benchmark",
+                     generate.plots=config$generate.plots,
+                     preprocess.transform=config$preprocess.transform,
+                     corr.method.pos=config$corr.method.pos,
+                     tuning.criterion.pos=config$tuning.criterion.pos,
+                     corr.method.neg=config$corr.method.neg,
+                     tuning.criterion.neg=config$tuning.criterion.neg) 
+  
+  if(!config$generate.plots) {
+    stargazer(DANA.bench$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison statistics for the benchmark data set", align=TRUE)
+  }
+  iplot.bench <- iggplot.corr(DANA.bench$data.model$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (un-normalized)", coords=coords)
+  iplot.bench.TMM <- iggplot.corr(DANA.bench$norm.models$benchmark.TMM$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (TMM)", coords=coords)
+}
+```
+
+## Test Data Set
+
+```{r test.full.pipeline}
+if(settings$test.DANA) {
+  genes <- rownames(test.RC)
+  
+  ## Apply Normalization
+  data.norm <- normalize(test.RC,
+                         groups=groups,
+                         name="test",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  test.norm <- data.norm
+  
+  ## Define Controls
+  pre.res <- define.controls(test.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls <- pre.res$genes.pos
+  pos.controls.test <- pre.res$genes.pos
+  neg.controls <- pre.res$genes.neg
+  neg.controls.test <- pre.res$genes.neg
+  clusters <- pre.res$clusters
+  clusters.test <- clusters
+  
+  # Apply DANA pipeline
+  DANA.test <- DANA(data.RC=test.RC, 
+                    data.norm=test.norm, 
+                    pos.controls=pos.controls.test, 
+                    neg.controls=neg.controls.test, 
+                    clusters=clusters.test,
+                    coords=coords,
+                    case.name="test",
+                    generate.plots=config$generate.plots,
+                    preprocess.transform=config$preprocess.transform,
+                    corr.method.pos=config$corr.method.pos,
+                    tuning.criterion.pos=config$tuning.criterion.pos,
+                    corr.method.neg=config$corr.method.neg,
+                    tuning.criterion.neg=config$tuning.criterion.neg) 
+  
+  if(!config$generate.plots) {
+    stargazer(DANA.test$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison metrics for the test data set", align=TRUE)
+  }
+  iplot.test <- iggplot.corr(DANA.test$data.model$pos$corr, clusters=clusters.test, title="Test data set - Positive controls (un-normalized)", coords=coords)
+  iplot.test.TMM <- iggplot.corr(DANA.test$norm.models$test.TMM$pos$corr, clusters=clusters.test, title="Test data set - Positive controls (TMM)", coords=coords)
+}
+```
+
+
+## Investigate Co-expression Structures
+
+We compare the estimated co-expression structures for the test and benchmark dataset. Here, we take a look at the models for the un-normalized data as well as TMM-normalized data. Note that you cannot directly compare the graphs of benchmark with test data since the considered set of genes is not identical.
+
+```{r investigate.coexpression}
+if(settings$investigate.coexpression && settings$bench.DANA && settings$test.DANA) {
+  htmltools::tagList(list(iplot.bench, iplot.bench.TMM, iplot.test, iplot.test.TMM))  # show plots in markdown
+}
+```
+
+
+
+
+# Plot co-expressions using interactive plots
+
+We compare the estimated co-expression structures for the test and benchmark dataset. Here, we take a look at the models for the un-normalized data as well as TMM-normalized data. Note that you cannot directly compare the graphs of benchmark with test data since the considered set of genes is not identical.
+
+```{r investigate.coexpression.comparison}
+if(settings$investigate.coexpression && settings$bench.DANA && settings$test.DANA) {
+  # Generate additional results for pearson correlation
+  DANA.test.pearson.res <- DANA(data.RC=test.RC, 
+                                data.norm=test.norm, 
+                                pos.controls=pos.controls.test, 
+                                neg.controls=neg.controls.test, 
+                                clusters=clusters.test,
+                                coords=coords,
+                                case.name="test",
+                                generate.plots=F,
+                                preprocess.transform="log2",
+                                corr.method.pos="pearson",
+                                tuning.criterion.pos="",
+                                corr.method.neg="pearson",
+                                tuning.criterion.neg="") 
+  
+  iplot.pearson.bench <- iggplot.corr(DANA.test.pearson.res$data.model$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (un-normalized) - Pearson Correlation", coords=coords)
+  iplot.pearson.bench.TMM <- iggplot.corr(DANA.test.pearson.res$norm.models$test.TMM$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (TMM)", coords=coords)
+  iplot.bench <- iggplot.corr(DANA.bench$data.model$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (un-normalized)", coords=coords)
+  iplot.bench.TMM <- iggplot.corr(DANA.bench$norm.models$benchmark.TMM$pos$corr, clusters=clusters.bench, title="Benchmark data set - Positive controls (TMM)", coords=coords)
+  iplot.test <- iggplot.corr(DANA.test$data.model$pos$corr, clusters=clusters.test, title="Test data set - Positive controls (un-normalized)", coords=coords)
+  iplot.test.TMM <- iggplot.corr(DANA.test$norm.models$test.TMM$pos$corr, clusters=clusters.test, title="Test data set - Positive controls (TMM)", coords=coords)
+  
+  
+  iplot.pearson.bench.neg <- iggplot.corr(DANA.test.pearson.res$data.model$neg$corr, clusters=clusters.bench, title="Benchmark data set - Negative controls (un-normalized) - Pearson Correlation", coords=coords)
+  iplot.pearson.bench.TMM.neg <- iggplot.corr(DANA.test.pearson.res$norm.models$test.TMM$neg$corr, clusters=clusters.test, title="Benchmark data set - Negative controls (TMM)", coords=coords)
+  iplot.bench.neg <- iggplot.corr(DANA.bench$data.model$neg$corr, clusters=clusters.bench, title="Benchmark data set - Negative controls (un-normalized)", coords=coords)
+  iplot.bench.TMM.neg <- iggplot.corr(DANA.bench$norm.models$benchmark.TMM$neg$corr, clusters=clusters.bench, title="Benchmark data set - Negative controls (TMM)", coords=coords)
+  iplot.test.neg <- iggplot.corr(DANA.test$data.model$neg$corr, clusters=clusters.test, title="Test data set - Negative controls (un-normalized)", coords=coords)
+  iplot.test.TMM.neg <- iggplot.corr(DANA.test$norm.models$test.TMM$neg$corr, clusters=clusters.test, title="Test data set - Negative controls (TMM)", coords=coords)
+  
+  htmltools::tagList(list(iplot.pearson.bench.neg, iplot.pearson.bench.TMM.neg, iplot.bench.neg, iplot.bench.TMM.neg, iplot.test.neg, iplot.test.TMM.neg))  # show plots in markdown
+  htmltools::tagList(list(iplot.pearson.bench.neg, iplot.pearson.bench.TMM.neg, iplot.bench.neg, iplot.bench.TMM.neg, iplot.test.neg, iplot.test.TMM.neg))  # show plots in markdown
+}
+```
+
+
+
+# Comparison of two Co-expression Estimation Methods
+
+In this section, we compare two methods for estimating the co-expression of miRNAs to each other. The methods can be chosen individually to positive and negative controls and include all available marginal and partial correaltion methods.
+
+## Computation
+
+```{r correlation.comparison.full.pipe}
+if(settings$compare.two.methods) {
+  ## Setup
+  show.plots <- TRUE 
+  # Method for estimating partial correlations
+  method1.name <- "Partial Correlations (Meinshausen-Buehlmann, bic)"
+  method1.pos <- "mb"
+  tuning.method1.pos <- "bic"  
+  method1.neg <- "mb"
+  tuning.method1.neg <- "bic"
+  # Method for estimating marginal correlations
+  method2.name <- "Marginal Correlations (Pearson)"
+  method2.pos <- "mb"
+  tuning.method2.pos <- "bic"  
+  method2.neg <- "pearson"
+  tuning.method2.neg <- ""
+  
+  ## Apply Normalization
+  data.norm <- normalize(test.RC,
+                         groups=groups,
+                         name="test",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  
+  
+  ## Define Controls
+  # Define Polycistronic Clusters and Controls
+  pre.res <- define.controls(test.RC,
+                             t.zero=config$t.zero,
+                             t.poor=config$t.poor,
+                             t.well=config$t.well,
+                             t.cluster=config$cluster.threshold,
+                             coords=coords,
+                             clusters=NULL)
+  pos.controls <- pre.res$genes.pos
+  neg.controls <- pre.res$genes.neg
+  clusters <- pre.res$clusters
+  rm(pre.res)
+  
+  
+  
+  
+  ## Apply DANA pipeline
+  # Method 1
+  DANA.method1 <- DANA(data.RC=test.RC, 
+                       data.norm=data.norm, 
+                       pos.controls=pos.controls, 
+                       neg.controls=neg.controls, 
+                       clusters=clusters,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=show.plots,
+                       preprocess.transform=config$preprocess.transform,
+                       corr.method.pos=method1.pos,
+                       tuning.criterion.pos=tuning.method1.pos,
+                       corr.method.neg=method1.neg,
+                       tuning.criterion.neg=tuning.method1.neg) 
+  
+  # Method 2
+  DANA.method2 <- DANA(data.RC=test.RC, 
+                       data.norm=data.norm, 
+                       pos.controls=pos.controls, 
+                       neg.controls=neg.controls, 
+                       clusters=clusters,
+                       coords=coords,
+                       case.name="test",
+                       generate.plots=show.plots,
+                       preprocess.transform=config$preprocess.transform,
+                       corr.method.pos=method2.pos,
+                       tuning.criterion.pos=tuning.method2.pos,
+                       corr.method.neg=method2.neg,
+                       tuning.criterion.neg=tuning.method2.neg) 
+  
+  if(!show.plots) {
+    stargazer(DANA.method1$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison statistics for the test data set", align=TRUE)
+    stargazer(DANA.method2$metrics, type="text", summary=FALSE, digits=4, 
+              title="Comparison statistics for the test data set", align=TRUE)
+  }
+  
+}
+``` 
+
+
+
+## Result Plots
+
+```{r correlation.comparison.full.pipe.plots}
+if(settings$compare.two.methods) {
+  p.res.stats.method1 <- plot.DANA.metrics(DANA.method1$metrics, label.repel=TRUE) + ggtitle(method1.name)
+  plot(p.res.stats.method1)
+  
+  p.res.stats.method2 <- plot.DANA.metrics(DANA.method2$metrics, label.repel=TRUE) + ggtitle(method2.name)
+  plot(p.res.stats.method2)
+}
+```
+
+
+
+# Comparison of DANA results for different choices of control cutoffs
+
+We compare the results of the DANA appraoch for different choices of the control cutoffs. We test three different configurations and plot the resulting DANA metrics for preservation of biological effects and removal of handling effects. We observe only small differences/variation of the results even though the controls are chosen considerably different.
+
+```{r DANA.test.different.cutoffs}
+if(settings$compare.cutoffs) {
+  ## Configuration of three possible cutoff choices
+  cutoff.conf1 <- list(
+    t.zero = 2,  # zero-expressed in [0, t.zero)
+    t.poor = 10,  # poorly-expressed in [t.zero, t.poor]
+    t.well = 2^7  # well-expressed in [t.well, inf)
+  )
+  cutoff.conf2 <- list(
+    t.zero = 1.5,  # zero-expressed in [0, t.zero)
+    t.poor = 5,  # poorly-expressed in [t.zero, t.poor]
+    t.well = 2^6  # well-expressed in [t.well, inf)
+  )
+  cutoff.conf3 <- list(
+    t.zero = 3,  # zero-expressed in [0, t.zero)
+    t.poor = 16,  # poorly-expressed in [t.zero, t.poor]
+    t.well = 2^8  # well-expressed in [t.well, inf)
+  )
+  
+  p.meanvar.conf1 <- plot.mean.sd(test.RC, cutoff.conf1$t.zero, 
+                                  cutoff.conf1$t.poor, cutoff.conf1$t.well)
+  print(p.meanvar.conf1)
+  p.RC.conf1 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf1$t.zero, 
+                               cutoff.conf1$t.poor, cutoff.conf1$t.well)
+  print(p.RC.conf1)
+  
+  p.meanvar.conf2 <- plot.mean.sd(test.RC, cutoff.conf2$t.zero, 
+                                  cutoff.conf2$t.poor, cutoff.conf2$t.well)
+  print(p.meanvar.conf2)
+  p.RC.conf2 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf2$t.zero, 
+                               cutoff.conf2$t.poor, cutoff.conf2$t.well)
+  print(p.RC.conf2)
+  
+  p.meanvar.conf3 <- plot.mean.sd(test.RC, cutoff.conf3$t.zero, 
+                                  cutoff.conf3$t.poor, cutoff.conf3$t.well)
+  print(p.meanvar.conf3)
+  p.RC.conf3 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf3$t.zero, 
+                               cutoff.conf3$t.poor, cutoff.conf3$t.well)
+  print(p.RC.conf3)
+  
+  
+  ## Apply Normalization
+  test.norm <- normalize(test.RC,
+                         groups=groups,
+                         name="test",
+                         apply.TC=config$norm.apply.TC,
+                         apply.UQ=config$norm.apply.UQ,
+                         apply.med=config$norm.apply.med,
+                         apply.TMM=config$norm.apply.TMM,
+                         apply.DESeq=config$norm.apply.DESeq,
+                         apply.PoissonSeq=config$norm.apply.PoissonSeq,
+                         apply.QN=config$norm.apply.QN,
+                         apply.RUV=config$norm.apply.RUV)
+  
+  ## Define Controls
+  
+  # config 1
+  cutoffs.1 <- define.controls(test.RC,
+                               t.zero=cutoff.conf1$t.zero,
+                               t.poor=cutoff.conf1$t.poor,
+                               t.well=cutoff.conf1$t.well,
+                               t.cluster=config$cluster.threshold,
+                               coords=coords,
+                               clusters=NULL)
+  pos.controls.1 <- cutoffs.1$genes.pos
+  neg.controls.1 <- cutoffs.1$genes.neg
+  clusters <- cutoffs.1$clusters
+  
+  # config 2
+  cutoffs.2 <- define.controls(test.RC,
+                               t.zero=cutoff.conf2$t.zero,
+                               t.poor=cutoff.conf2$t.poor,
+                               t.well=cutoff.conf2$t.well,
+                               t.cluster=config$cluster.threshold,
+                               coords=coords,
+                               clusters=NULL)
+  pos.controls.2 <- cutoffs.2$genes.pos
+  neg.controls.2 <- cutoffs.2$genes.neg
+  
+  
+  # config 3
+  cutoffs.3 <- define.controls(test.RC,
+                               t.zero=cutoff.conf3$t.zero,
+                               t.poor=cutoff.conf3$t.poor,
+                               t.well=cutoff.conf3$t.well,
+                               t.cluster=config$cluster.threshold,
+                               coords=coords,
+                               clusters=NULL)
+  pos.controls.3 <- cutoffs.3$genes.pos
+  neg.controls.3 <- cutoffs.3$genes.neg
+  
+  
+  
+  ## Apply DANA pipeline
+  
+  # Config 1
+  DANA.1 <- DANA(data.RC=test.RC, 
+                 data.norm=test.norm, 
+                 pos.controls=pos.controls.1, 
+                 neg.controls=neg.controls.1, 
+                 clusters=clusters,
+                 coords=coords,
+                 case.name="config1",
+                 generate.plots=FALSE,
+                 preprocess.transform=config$preprocess.transform,
+                 corr.method.pos=config$corr.method.pos,
+                 tuning.criterion.pos=config$tuning.criterion.pos,
+                 corr.method.neg=config$corr.method.neg,
+                 tuning.criterion.neg=config$tuning.criterion.neg) 
+  rownames(DANA.1$metrics) <- substr(rownames(DANA.1$metrics), 6, 20)
+  
+  # Config 2
+  DANA.2 <- DANA(data.RC=test.RC, 
+                 data.norm=test.norm, 
+                 pos.controls=pos.controls.2, 
+                 neg.controls=neg.controls.2, 
+                 clusters=clusters,
+                 coords=coords,
+                 case.name="config2",
+                 generate.plots=FALSE,
+                 preprocess.transform=config$preprocess.transform,
+                 corr.method.pos=config$corr.method.pos,
+                 tuning.criterion.pos=config$tuning.criterion.pos,
+                 corr.method.neg=config$corr.method.neg,
+                 tuning.criterion.neg=config$tuning.criterion.neg) 
+  rownames(DANA.2$metrics) <- substr(rownames(DANA.2$metrics), 6, 20)
+  
+  # Config 3
+  DANA.3 <- DANA(data.RC=test.RC, 
+                 data.norm=test.norm, 
+                 pos.controls=pos.controls.3, 
+                 neg.controls=neg.controls.3, 
+                 clusters=clusters,
+                 coords=coords,
+                 case.name="config3",
+                 generate.plots=FALSE,
+                 preprocess.transform=config$preprocess.transform,
+                 corr.method.pos=config$corr.method.pos,
+                 tuning.criterion.pos=config$tuning.criterion.pos,
+                 corr.method.neg=config$corr.method.neg,
+                 tuning.criterion.neg=config$tuning.criterion.neg) 
+  rownames(DANA.3$metrics) <- substr(rownames(DANA.3$metrics), 6, 20)
+  
+  # Plot results
+
+  p.result.DANA.1 <- plot.DANA.metrics(DANA.1$metrics, label.repel = TRUE)
+  plot(p.result.DANA.1 + ggtitle("Configuration 1"))
+  p.result.DANA.2 <- plot.DANA.metrics(DANA.2$metrics, label.repel = TRUE)
+  plot(p.result.DANA.2 + ggtitle("Configuration 2"))
+  p.result.DANA.3 <- plot.DANA.metrics(DANA.3$metrics, label.repel = TRUE)
+  plot(p.result.DANA.3 + ggtitle("Configuration 3"))
+}
+```
+
+
+
+# Differential Expression Analysis
+
+
+## Normalize Data
+
+```{r DEA.normalize.data}
+if(settings$perform.DEA) {
+  ## Reset data
+  test.RC <- test 
+  bench.RC <- benchmark  
+  
+  ## Normalize test Data
+  test.norm <- normalize(test.RC,
+                         groups=groups,
+                         name="test",
+                         apply.TC=config.DEA$norm.apply.TC,
+                         apply.UQ=config.DEA$norm.apply.UQ,
+                         apply.med=config.DEA$norm.apply.med,
+                         apply.TMM=config.DEA$norm.apply.TMM,
+                         apply.DESeq=config.DEA$norm.apply.DESeq,
+                         apply.PoissonSeq=config.DEA$norm.apply.PoissonSeq,
+                         apply.QN=config.DEA$norm.apply.QN,
+                         apply.RUV=FALSE)
+  test.norm.RUV.adjust <- list(test.RUVr=norm.RUV(test.RC, groups, "RUVr")$adjust.factor,
+                               test.RUVs=norm.RUV(test.RC, groups, "RUVs")$adjust.factor,
+                               test.RUVg=norm.RUV(test.RC, groups, "RUVg")$adjust.factor)
+}
+```
+
+
+## Benchmark DEA
+
+```{r DEA.benchmark}
+if(settings$perform.DEA) {
+  ## Perform DEA on benchmark dataset
+  bench.DEA <- DE.voom(data.RC=bench.RC, groups=groups, plot=config.DEA$generate.meanvar.plot)
+  if(config.DEA$generate.volcano.plot) plot.DE.volcano(bench.DEA, alpha=config.DEA$alpha, q.values=config.DEA$q.values)
+}
+```
+
+
+## Test DEA
+
+```{r DEA.test}
+if(settings$perform.DEA) {
+  ## Perform DEA on full dataset
+  test.DEA <- DE.voom(data.RC=test.RC, groups=groups, plot=config.DEA$generate.meanvar.plot, plot.title="test (no norm)")
+  if(config.DEA$generate.volcano.plot) plot.DE.volcano(test.DEA, alpha=config.DEA$alpha, q.values=config.DEA$q.values, title="test (no norm)")
+  
+  ## DEA for normalized test data
+  test.norm.DEA <- list()
+  for(i in 1:length(test.norm)) {
+    test.norm.DEA <- 
+      append(test.norm.DEA, list(DE.voom(data.RC=test.norm[[i]], 
+                                         groups=groups, 
+                                         plot=config.DEA$generate.meanvar.plot,
+                                         plot.title=names(test.norm)[i])))
+    if(config.DEA$generate.volcano.plot) {
+      plot.DE.volcano(test.norm.DEA[[i]], 
+                      alpha=config.DEA$alpha, 
+                      q.values=config.DEA$q.values, 
+                      title=names(test.norm)[i])
+    }
+  }
+  ## DEA for RUV normalization
+  for(i in 1:length(test.norm.RUV.adjust)) {
+    test.norm.DEA <- 
+      append(test.norm.DEA, list(DE.voom(data.RC=test.RC, 
+                                         groups=groups, 
+                                         plot=config.DEA$generate.meanvar.plot,
+                                         plot.title=names(test.norm.RUV.adjust)[i],
+                                         adjust=test.norm.RUV.adjust[[i]])))
+    if(config.DEA$generate.volcano.plot) {
+      plot.DE.volcano(test.norm.DEA[[i]], 
+                      alpha=config.DEA$alpha, 
+                      q.values=config.DEA$q.values, 
+                      title=names(test.norm.RUV.adjust)[i])
+    }
+  }
+  names(test.norm.DEA) <- c(names(test.norm), names(test.norm.RUV.adjust))
+}
+```
+
+
+
+## Results
+
+```{r DEA.Test.vs.Benchmark}
+if(settings$perform.DEA) {
+  ## Compare test (non-norm) to benchmark
+  test.norm.DEA.stats <- list(test=compare.DEAs(DEA=test.DEA,
+                                           truth.DEA=bench.DEA,
+                                           alpha=config.DEA$alpha))
+  ## Compare normalized test data to benchmark
+  for(i in 1:length(test.norm.DEA)) {
+    test.norm.DEA.stats <- 
+      append(test.norm.DEA.stats, 
+             list(compare.DEAs(DEA=test.norm.DEA[[i]],
+                               truth.DEA=bench.DEA,
+                               alpha=config.DEA$alpha,
+                               subset=switch(config.DEA$perform.subsetting+1,
+                                             NULL,
+                                             rownames(test.norm.DEA[[i]])))))
+  }
+  names(test.norm.DEA.stats) <- c("test.No Norm", names(test.norm.DEA))
+  test.norm.DEA.stats <- test.norm.DEA.stats[1:length(test.norm.DEA.stats)]
+  
+  
+  ## Visualize results
+  
+  # FNR-FDR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             FDR=-sapply(test.norm.DEA.stats, function(x) x$FDR)+1,
+                             FNR=-sapply(test.norm.DEA.stats, function(x) x$FNR)+1)
+  p.test.DEA.FNR.FDR <- ggplot(test.DEA.res, aes(x=FNR, y=FDR, label=method)) +
+      theme_bw() + 
+      geom_point(alpha=1) + 
+      xlab("Sensitivity") + # True positive rate(1-FNR)
+      ylab("Precision") + # Positive predictive value (1-FDR)
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.FNR.FDR)
+  
+  # TPR-FPR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             TPR=sapply(test.norm.DEA.stats, function(x) x$TPR),
+                             FPR=-sapply(test.norm.DEA.stats, function(x) x$FPR)+1)
+  p.test.DEA.TPR.FPR <- ggplot(test.DEA.res, aes(x=TPR, y=FPR, label=method)) +
+      theme_bw() + 
+      geom_point(alpha=1) + 
+      xlab("Sensitivity") + 
+      ylab("Specificity") + 
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.TPR.FPR)
+  
+  # CAT Plot
+  d <- append(list("test.No Norm"=test.DEA), test.norm.DEA)
+  names(d) <- substr(names(d), 6, 20)
+  p.test.DEA.CAT <- plot.CAT(DEA=d, 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=100)
+  print(p.test.DEA.CAT)
+  rm(d)
+}
+```
+
+
+
+
+
+# Results and Figures for Paper
+
+## Number of samples, markers, and positive and negative controls
+
+```{r generate.paper.figs.data.inspection}
+if(settings$generate.paper.figs) {
+  
+# Dimension of data after analysis
+cat("Test data:\n")
+cat("  - Dimensions: p=", dim(test.RC)[1],", n=", dim(test.RC)[2], "\n", sep="")
+cat("  - Positive controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.well, ", inf ]\n", sep="")
+cat("    * Number of positive controls miRNAs:", length(pos.controls.test), "\n")
+cat("  - Negative controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.zero, ",", config$t.poor, "]\n")
+cat("    * Number of negative controls miRNAs:", length(neg.controls.test), "\n")
+
+
+cat("\n\nBenchmark data:\n")
+cat("  - Dimensions: p=", dim(bench.RC)[1],", n=", dim(bench.RC)[2], "\n", sep="")
+cat("  - Positive controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.well, ", inf ]\n", sep="")
+cat("    * Number of positive controls miRNAs:", length(pos.controls.bench), "\n")
+cat("  - Negative controls:\n")
+cat("    * Definition mean RC in interval: [", config$t.zero, ",", config$t.poor, "]\n")
+cat("    * Number of negative controls miRNAs:", length(neg.controls.bench), "\n")
+
+}
+```
+
+
+## Read Count Distribution in the Data
+
+### Per Data-Set
+
+```{r generate.paper.figs.RC.distribution}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- log2(rowMeans(test.RC)+1)
+  df <- data.frame(log.expression=test.RC.log2)
+  p.test.RC.hist <- ggplot(df, aes(x=log.expression)) + 
+    geom_histogram(binwidth = .1, color="black", fill="black") +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="9e086c",  linetype="longdash") +
+    ggtitle("Test data set") +
+    theme_classic()
+  print(p.test.RC.hist)
+  rm(df)
+
+  
+  # Histogram plot benchmark data set
+  bench.RC.log2 <- log2(rowMeans(bench.RC)+1)
+  df <- data.frame(log.expression=bench.RC.log2)
+  p.bench.RC.hist <- ggplot(df, aes(x=log.expression)) + 
+    geom_histogram(binwidth = .1, color="black", fill="black") +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#3051ab", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="#9e086c",  linetype="longdash") +
+    ggtitle("Benchmark data set") +
+    theme_classic()
+  print(p.bench.RC.hist)
+  rm(df)
+  
+  
+  # Combined read count histogram for test and benchmark data
+  df <- data.frame(bench=bench.RC.log2, test=test.RC.log2)
+  p.RC.hist <- ggplot(df) + 
+    theme_classic() +
+    geom_histogram(aes(x=test, y=..count..,fill="#69b3a2"), binwidth = .1) +
+    geom_histogram(aes(x=bench, y=-..count.., fill="#404080"), binwidth = .1) +
+    geom_vline(xintercept = log2(config$t.zero+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.poor+1), color="#5851b8", linetype="twodash") +
+    geom_vline(xintercept = log2(config$t.well+1), color="#E7298A",  linetype="longdash") +
+    geom_segment(aes(x = log2(config$t.zero+1), y = 75, xend = log2(config$t.poor+1), yend = 75),
+                 arrow=arrow(length=unit(.07, "in"), ends="both"),
+                 color="#5851b8") +
+    annotate(geom="label", x=(log2(config$t.zero+1)+log2(config$t.poor+1))/2.0, y=84,
+             label="neg. contr.", color="#5851b8", size=4, fill = alpha(c("white"),0.85), label.size = NA) +
+    geom_segment(aes(x = log2(config$t.well+1), y = 75, xend = 10, yend = 75),
+                 arrow=arrow(length=unit(.07, "in"), ends="last"),
+                 color="#E7298A") +
+    annotate(geom="label", x=log2(config$t.well+1)+.5, y=84,
+             label="pos. contr.", color="#E7298A", size=4, hjust=0, fill = alpha(c("white"),0.85), label.size = NA) +
+    # ylim(c(-90,90)) +
+    scale_fill_manual(name="Data set",values=c("#404080", "#69b3a2"), labels=c("benchmark", "test"), guide = guide_legend(reverse=TRUE)) +
+    # ggtitle("log2(Read count + 1)") +
+    theme(legend.position=c(0.86,0.86), 
+          # legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.9))) +
+    scale_y_continuous(breaks=c(-50,0,50), labels=c(50,0,50), limits=c(-95,95)) +
+    xlab("Mean") +
+    ylab("Frequency")
+    # theme(panel.border = element_blank(),
+    #       axis.line = element_line(color = 'black'))
+  print(p.RC.hist)
+  rm(df)
+  
+    ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_RC_Distribution.pdf"), p.RC.hist, width = 5, height=4, device="pdf")
+  }
+  
+}
+```
+
+### Group Means comparison between test and benchmark
+
+```{r generate.paper.figs.RC.comparison}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  ## log2(mean(RC))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- log2(rowMeans(test.RC)+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC)+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test") + 
+    ylab("benchmark") + 
+    ggtitle("log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (PMFH only)
+  test.RC.log2 <- log2(rowMeans(test.RC[, groups=="PMFH"])+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC[, groups=="PMFH"])+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.PMFH.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test (PMFH)") + 
+    ylab("benchmark (PMFH)") + 
+    ggtitle(" PMFH  ---  log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.PMFH.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (MXF only)
+  test.RC.log2 <- log2(rowMeans(test.RC[, groups=="MXF"])+1)
+  bench.RC.log2 <- log2(rowMeans(bench.RC[, groups=="MXF"])+1)
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.MXF.1 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test (MXF)") + 
+    ylab("benchmark (MXF)") + 
+    ggtitle(" MXF  ---  log2(mean(read count) + 1)") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.MXF.1)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  
+  
+  ## log2(mean(RC))
+  
+  # Histogram plot test data set
+  test.RC.log2 <- rowMeans(log2(test.RC+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test") + 
+    ylab("benchmark") + 
+    ggtitle("mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (PMFH only)
+  test.RC.log2 <- rowMeans(log2(test.RC[, groups=="PMFH"]+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC[, groups=="PMFH"]+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.PMFH.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test (PMFH)") + 
+    ylab("benchmark (PMFH)") + 
+    ggtitle(" PMFH  ---  mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.PMFH.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+  # Histogram plot test data set (MXF only)
+  test.RC.log2 <- rowMeans(log2(test.RC[, groups=="MXF"]+1))
+  bench.RC.log2 <- rowMeans(log2(bench.RC[, groups=="MXF"]+1))
+  df <- data.frame(test=test.RC.log2, benchmark=bench.RC.log2)
+  p.RC.comparison.MXF.2 <- ggplot(df,aes(x=test,y=benchmark)) + 
+    geom_point(alpha=.25) + 
+    xlab("test (MXF)") + 
+    ylab("benchmark (MXF)") + 
+    ggtitle(" MXF  ---  mean(log2(read count + 1))") +
+      geom_abline(intercept = 0, slope = 1, color="black", linetype="longdash", size=.5) +
+    theme(aspect.ratio = 1) +
+    theme_classic()
+  print(p.RC.comparison.MXF.2)
+  rm(df,test.RC.log2, bench.RC.log2)
+  
+    ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_RC_Comparison_all1.pdf"), p.RC.comparison.2, width = 5, height=5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_RC_Comparison_PMFH1.pdf"), p.RC.comparison.PMFH.2, width = 5, height=5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_RC_Comparison_MXF1.pdf"), p.RC.comparison.MXF.2, width = 5, height=5, device="pdf")
+  }
+  
+}
+```
+
+
+## Mean-Variance Plot
+
+### Distribution property among technical replicates
+
+```{r generate.paper.figs.mean.variance.plot1}
+if(settings$generate.paper.figs) {
+  # Function for mean-variance plot for a given data set
+  mean.variance.plot <- function(data.RC, title, axis.limit=NULL) {
+    df <- data.frame(data.mean=log10(rowMeans(data.RC) + 1),
+                     data.var =log10(rowVars(data.RC) + 1))
+    lin.fit <- lm(df$data.var ~ df$data.mean)$coefficients
+    p <- ggplot(df,aes(x=data.mean,y=data.var)) + 
+      geom_point(alpha=.25) + 
+      xlab("log10(Mean)") + 
+      ylab("log10(Variance)") + 
+      geom_abline(intercept = lin.fit[1], slope = lin.fit[2], color="red", linetype="longdash", size=1) +
+      geom_abline(intercept = 0, slope = 1, colour="blue") +
+      annotate("text", alpha=1, x=4, y=0.5, hjust=0, vjust=0, size=3, colour="red",
+               label=paste0("log10(Variance) = ", round(lin.fit[1],2), " + ", round(lin.fit[2],2), "*log10(Mean)")) + 
+      xlim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ylim(0, ifelse(is.null(axis.limit), max(df), axis.limit)) +
+      ggtitle(title) +
+      theme(aspect.ratio=1, plot.title = element_text(hjust = 0.5)) +
+      theme_classic()
+    return(p)
+  }
+  
+  ## Test data
+  # PMFH and MXF
+  p.meanvar.test <- mean.variance.plot(test.RC, "Test Data", axis.limit=12.5)
+  print(p.meanvar.test)
+  # PMFH
+  p.meanvar.test.PMFH <- mean.variance.plot(test.RC[, groups == "PMFH"], "Test Data - PMFH", axis.limit=12.5)
+  print(p.meanvar.test.PMFH)
+  # MXF
+  p.meanvar.test.MXF <- mean.variance.plot(test.RC[, groups == "MXF"], "Test Data - MXF", axis.limit=12.5)
+  print(p.meanvar.test.MXF)
+  
+  ## Benchmark data
+  # PMFH and MXF
+  p.meanvar.bench <- mean.variance.plot(bench.RC, "Benchmark Data", axis.limit=12.5)
+  print(p.meanvar.bench)
+  # PMFH
+  p.meanvar.bench.PMFH <- mean.variance.plot(bench.RC[, groups == "PMFH"], "Benchmark Data - PMFH", axis.limit=12.5)
+  print(p.meanvar.bench.PMFH)
+  # MXF
+  p.meanvar.bench.MXF <- mean.variance.plot(bench.RC[, groups == "MXF"], "Benchmark Data - MXF", axis.limit=12.5)
+  print(p.meanvar.bench.MXF)
+}
+```
+
+### Marker-specific sd vs mean
+
+```{r generate.paper.figs.mean.variance.plot2}
+if(settings$generate.paper.figs) {
+  
+  ## Test data
+  # PMFH and MXF
+  p.meanvar.test <- plot.mean.sd(test.RC, config$t.zero, config$t.poor, config$t.well)
+  print(p.meanvar.test)
+  # PMFH
+  p.meanvar.test.PMFH <- plot.mean.sd(test.RC[, groups == "PMFH"], config$t.zero, config$t.poor, config$t.well, "Test Data - PMFH")
+  print(p.meanvar.test.PMFH)
+  # MXF
+  p.meanvar.test.MXF <- plot.mean.sd(test.RC[, groups == "MXF"], config$t.zero, config$t.poor, config$t.well, "Test Data - MXF")
+  print(p.meanvar.test.MXF)
+  
+  ## Benchmark data
+  # PMFH and MXF
+  p.meanvar.bench <- plot.mean.sd(bench.RC, config$t.zero, config$t.poor, config$t.well, "Benchmark Data")
+  print(p.meanvar.bench)
+  # PMFH
+  p.meanvar.bench.PMFH <- plot.mean.sd(bench.RC[, groups == "PMFH"], config$t.zero, config$t.poor, config$t.well, "Benchmark Data - PMFH")
+  print(p.meanvar.bench.PMFH)
+  # MXF
+  p.meanvar.bench.MXF <- plot.mean.sd(bench.RC[, groups == "MXF"], config$t.zero, config$t.poor, config$t.well, "Benchmark Data - MXF")
+  print(p.meanvar.bench.MXF)
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_Test_MeanSD.pdf"), p.meanvar.test, width = 5, height=4, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Plots
+
+```{r generate.paper.figs.correlation}
+if(settings$generate.paper.figs) {
+  num.genes.plot.pos <- 60
+  num.genes.plot.neg <- 60
+
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  test.model <- DANA.test$data.model
+  test.norm.model <- DANA.test$norm.models$test.TMM
+  
+  # Common control miRNAs
+  pos.controls.bench <- rownames(bench.model$pos$corr)
+  pos.controls.test <- rownames(test.model$pos$corr)
+  pos.controls.common <- intersect(pos.controls.test, pos.controls.bench)
+  neg.controls.bench <- rownames(bench.model$neg$corr)
+  neg.controls.test <- rownames(test.model$neg$corr)
+  # neg.controls.common <- intersect(neg.controls.test, neg.controls.bench)
+  # reduce the number of genes for the plot
+  pos.controls.plot <- pos.controls.common[2:num.genes.plot.pos+1]
+  
+  num.genes.plot.neg <- min(num.genes.plot.neg,
+                            dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.bench.pos <- bench.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.test.pos <- test.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.test.norm.pos <- test.norm.model$pos$corr[pos.controls.plot, pos.controls.plot]
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm.neg <- test.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  ### Generate plots
+  # Positive controls
+  p.corr.pos.bench <- ggplot.corr(corr.bench.pos, 
+                                  clusters=clusters, 
+                                  threshold=0, 
+                                  title="benchmark (un-normalized)")
+  p.corr.pos.test <- ggplot.corr(corr.test.pos, 
+                                 clusters=clusters, 
+                                 threshold=0, 
+                                 title="test (un-normalized)")
+  p.corr.pos.test.norm <- ggplot.corr(corr.test.norm.pos, 
+                                     clusters=clusters, 
+                                     threshold=0, 
+                                     title="test (TMM)")
+  
+  p.corr.pos <- arrangeGrob(p.corr.pos.bench + theme(legend.position="none"), 
+                            p.corr.pos.test + theme(legend.position="none"),
+                            get.legend(p.corr.pos.bench), 
+                            widths = c(2,2,1))
+  grid.arrange(p.corr.pos)  # plot
+  
+  p.corr.pos.three <- arrangeGrob(p.corr.pos.bench + theme(legend.position="none"), 
+                                  p.corr.pos.test.norm + theme(legend.position="none"),
+                                  p.corr.pos.test + theme(legend.position="none"),
+                                  get.legend(p.corr.pos.bench + theme(legend.position = "bottom")),
+                                  layout_matrix=rbind(c(1,2,3), c(4,4,4)),
+                                  heights = c(5,1))
+  grid.arrange(p.corr.pos.three)  # plot
+  
+  # Negative controls
+  p.corr.neg.bench <- ggplot.corr(corr.bench.neg, 
+                                  clusters=clusters, 
+                                  threshold=0, 
+                                  title="benchmark (un-normalized)")
+  p.corr.neg.test <- ggplot.corr(corr.test.neg, 
+                                 clusters=clusters, 
+                                 threshold=0, 
+                                 title="test (un-normalized)")
+  p.corr.neg.test.norm <- ggplot.corr(corr.test.norm.neg, 
+                                     clusters=clusters, 
+                                     threshold=0, 
+                                     title="test (TMM)")
+  
+  p.corr.neg <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
+                            p.corr.neg.test + theme(legend.position="none"),
+                            get.legend(p.corr.neg.bench),
+                            widths = c(2,2,1))
+  grid.arrange(p.corr.neg)  # plot
+  
+  
+  p.corr.neg.three <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
+                                  p.corr.neg.test.norm + theme(legend.position="none"),
+                                  p.corr.neg.test + theme(legend.position="none"),
+                                  get.legend(p.corr.neg.bench + theme(legend.position = "bottom")),
+                                  layout_matrix=rbind(c(1,1,2,2,3,3), c(4,4,4,4,4,4)),
+                                  heights = c(5,1))
+  grid.arrange(p.corr.neg.three)  # plot
+  
+  
+  ## Export Plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrPos.pdf"), p.corr.pos, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrNeg.pdf"), p.corr.neg, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrPos_TMM.pdf"), p.corr.pos.three, width = 8, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrNeg_TMM.pdf"), p.corr.neg.three, width = 8, height=3.5, device="pdf")
+  }
+}
+```
+
+
+### All normalization methods
+
+```{r generate.paper.figs.correlation.all}
+if(settings$generate.paper.figs) { 
+  p.corr.test <- ggplot.corr(DANA.test$data.model$pos$corr,
+                             clusters=clusters,
+                             title="un-normalized")
+  p.corr.bench <- ggplot.corr(DANA.bench$data.model$pos$corr,
+                              clusters=clusters,
+                              title="benchmark data (un-normalized)")
+  p.corr.TMM <- ggplot.corr(DANA.test$norm.models$test.TMM$pos$corr,
+                            clusters=clusters,
+                            title="TMM")
+  p.corr.DESeq <- ggplot.corr(DANA.test$norm.models$test.DESeq$pos$corr,
+                            clusters=clusters,
+                            title="DESeq")
+  p.corr.PoissonSeq <- ggplot.corr(DANA.test$norm.models$test.PoissonSeq$pos$corr,
+                            clusters=clusters,
+                            title="PoissonSeq")
+  p.corr.TC <- ggplot.corr(DANA.test$norm.models$test.TC$pos$corr,
+                            clusters=clusters,
+                            title="TC")
+  p.corr.Med <- ggplot.corr(DANA.test$norm.models$test.Med$pos$corr,
+                            clusters=clusters,
+                            title="Med")
+  p.corr.RUVg <- ggplot.corr(DANA.test$norm.models$test.RUVg$pos$corr,
+                            clusters=clusters,
+                            title="RUVg")
+  p.corr.RUVs <- ggplot.corr(DANA.test$norm.models$test.RUVs$pos$corr,
+                            clusters=clusters,
+                            title="RUVs")
+  p.corr.RUVr <- ggplot.corr(DANA.test$norm.models$test.RUVr$pos$corr,
+                            clusters=clusters,
+                            title="RUVr")
+  p.corr.UQ <- ggplot.corr(DANA.test$norm.models$test.UQ$pos$corr,
+                            clusters=clusters,
+                            title="UQ")
+  p.corr.QN <- ggplot.corr(DANA.test$norm.models$test.QN$pos$corr,
+                            clusters=clusters,
+                            title="QN")
+  
+  # Arrange plots
+  p.corr.test.all <-
+    plot_grid(p.corr.test + theme(legend.position="none"),
+              p.corr.TMM + theme(legend.position="none"),
+              p.corr.DESeq + theme(legend.position="none"),
+              p.corr.UQ + theme(legend.position="none"),
+              p.corr.TC + theme(legend.position="none"),
+              p.corr.Med + theme(legend.position="none"),
+              p.corr.RUVg + theme(legend.position="none"),
+              p.corr.RUVs + theme(legend.position="none"),
+              p.corr.RUVr + theme(legend.position="none"),
+              p.corr.PoissonSeq + theme(legend.position="none"),
+              p.corr.QN + theme(legend.position="none"),
+              get.legend(p.corr.test + theme(legend.position = "bottom")),
+              ncol=3)
+  plot(p.corr.test.all)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_Test_Corr_All.pdf"), p.corr.test.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+
+
+## Correlation Frequency Plots
+
+### Subset for paper
+
+```{r generate.paper.figs.corr.density.paper}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  bench.norm.model <- DANA.bench$norm.models$benchmark.TMM
+  test.model <- DANA.test$data.model
+  test.norm.model1 <- DANA.test$norm.models$test.TMM
+  test.norm.model2 <- DANA.test$norm.models$test.RUVs
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1],
+                            dim(test.norm.model1$neg$corr)[1],
+                            dim(test.norm.model2$neg$corr)[1])
+  
+  # Subsetted correlation matrices
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.bench.norm1.neg <- bench.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm1.neg <- test.norm.model1$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm2.neg <- test.norm.model2$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  
+  ## extract non-zero correlations
+  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg != 0]
+  nnz.corr.test.norm1.neg <- corr.test.norm1.neg[upper.tri(corr.test.norm1.neg)]
+  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg != 0]
+  nnz.corr.test.norm2.neg <- corr.test.norm2.neg[upper.tri(corr.test.norm2.neg)]
+  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg != 0]
+  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg != 0]
+  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg != 0]
+  
+  # Keep positive correlations
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
+  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg > 0]
+  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg > 0]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
+  
+
+  
+  ## direct comparison of negative controls benchmark vs test vs test.norm1
+  neg.corr <- data.frame(
+    control=factor(c(rep("Benchmark", length(nnz.corr.bench.neg)), 
+                     rep("Test", length(nnz.corr.test.neg)),
+                     rep("Test (TMM)", length(nnz.corr.test.norm1.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
+    )
+  
+  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    scale_linetype_manual(values=c("solid", "solid", "twodash"))+
+    scale_color_manual(values=c('#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.9,0.9), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") +
+    ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq)
+  
+  
+  ## direct comparison of negative controls benchmark vs test vs test.norm1 vs test.norm2
+  neg.corr <- data.frame(
+    control=factor(c(rep("Benchmark", length(nnz.corr.bench.neg)), 
+                     rep("Test", length(nnz.corr.test.neg)),
+                     rep("Test (TMM)", length(nnz.corr.test.norm1.neg)),
+                     rep("Test (RUVs)", length(nnz.corr.test.norm2.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg, nnz.corr.test.norm2.neg))
+    )
+  # ttt <- data.frame(prop.table(table(method=neg.corr$control, corr=neg.corr$corr), 1))
+  
+  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    # scale_linetype_manual(values=c("twodash", "solid", "solid", "solid"))+
+    scale_color_manual(values=c('#e7298a','#1B9E77','#D95F02', '#7570B3')) + # First colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.9,0.86), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") #+ ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq)
+  
+  
+  
+  # Additional Plot with normalized benchmark
+  neg.corr <- data.frame(
+    control=factor(c(rep("Benchmark", length(nnz.corr.bench.neg)), 
+                     rep("Benchmark (TMM)", length(nnz.corr.bench.norm1.neg)),
+                     rep("Test", length(nnz.corr.test.neg)),
+                     rep("Test (TMM)", length(nnz.corr.test.norm1.neg)))),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.bench.norm1.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
+    )
+  p.density.neg.nnz.freq.four <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.8, size=1) +
+    theme_classic() +
+    xlim(0, 1) +
+    theme(legend.position=c(0.9,0.9), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") +
+    scale_linetype_manual(values=c("solid", "twodash","solid", "twodash"))+
+    scale_color_manual(values=c('#1B9E77','#1B9E77','#D95F02','#D95F02'))  + # First 2 colors from rcolorbrewer set "Dark2" 
+    ggtitle("Positive correlation among negative controls")
+  print(p.density.neg.nnz.freq.four)
+  
+  
+  
+  if(settings$export.figures) {
+    # ggsave(paste0(settings$paper.fig.path, "MSK_CorrDensityNeg_Hist.pdf"), p.density.neg.nnz.hist, width = 5, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrDensityNeg_Freq.pdf"), p.density.neg.nnz.freq, width = 5, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrDensityNeg_Freq_WithBench.pdf"), p.density.neg.nnz.freq.four, width = 5, height=4, device="pdf")
+  }
+}
+```
+
+
+
+### All methods (for supplement)
+
+
+```{r generate.paper.figs.corr.density.supplements}
+if(settings$generate.paper.figs) {
+  # Co-expression models
+  bench.model <- DANA.bench$data.model
+  test.model <- DANA.test$data.model
+  test.norm.model1 <- DANA.test$norm.models$test.TMM
+  test.norm.model2 <- DANA.test$norm.models$test.RUVs
+  
+  # Set number of genes for negative correlation to minimum
+  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
+                            dim(bench.model$neg$corr)[1],
+                            sapply(DANA.test$norm.models, function(x) dim(x$neg$corr)[1]))
+  
+  # Subsetted correlation matrices
+  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
+  corr.test.norm.neg <- lapply(DANA.test$norm.models, function(x) x$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg])
+  
+  ## Strictly positive correlations
+  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
+  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
+  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
+  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
+  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
+  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
+  nnz.corr.test.norm.neg <- lapply(corr.test.norm.neg, function(x) x[upper.tri(x)][x[upper.tri(x)] > 0])
+  names(nnz.corr.test.norm.neg) <- substr(names(nnz.corr.test.norm.neg), 6, 20)
+  
+  control <- c(rep("Benchmark", length(nnz.corr.bench.neg)), 
+                     rep("Test", length(nnz.corr.test.neg)))
+  for(i in 1:length(nnz.corr.test.norm.neg)) {
+    control <- c(control, rep(paste0("Test (", names(nnz.corr.test.norm.neg)[i],")"), length(nnz.corr.test.norm.neg[[i]])))
+  }
+  ## direct comparison of negative controls benchmark vs test vs test.norm1
+  neg.corr <- data.frame(
+    control=factor(control),
+    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, unname(unlist(nnz.corr.test.norm.neg))))
+    )
+  
+  p.corr.frequency.neg.controls.all <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_freqpoly(binwidth=.05, alpha=.9, size=.9) +
+    theme_classic() +
+    xlim(0, 1) +
+    scale_color_manual(values=brewer.pal(n=12, name="Paired")) + # First 2 colors from rcolorbrewer set "Dark2"
+    theme(legend.position=c(0.85,0.6), 
+          legend.title=element_blank(),
+          legend.background=element_rect(fill=alpha('white', 0.5))) +
+    ylab("Frequency") +
+    xlab("Marginal correlation") + #+ ggtitle("Positive correlation among negative controls") + 
+    theme(legend.key.width = unit(2,"cm"))
+  print(p.corr.frequency.neg.controls.all)
+  
+  
+  if(settings$export.figures) {
+    # ggsave(paste0(settings$paper.fig.path, "MSK_CorrDensityNeg_Hist.pdf"), p.density.neg.nnz.hist, width = 5, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_CorrDensityNeg_Freq_All.pdf"), p.corr.frequency.neg.controls.all, width = 8, height=5, device="pdf")
+  }
+}
+```
+
+
+## Correlation Scatter Plots
+
+### Subset for paper
+
+```{r generate.paper.figs.corr.scatter}
+if(settings$generate.paper.figs) {
+  ## Generate correlation scatter plots for positive controls for TMM and UQ
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs TMM
+  p.scatter.test.TMM <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TMM$pos$corr,
+    clusters=clusters.test,
+    title="TMM vs. un-normalized",
+    xlab="un-normalized", 
+    ylab="TMM", 
+    threshold=0,
+    ccc=DANA.test$metrics["test.TMM", "cc"])
+  print(p.scatter.test.TMM)
+  # un-normalized vs UQ
+  p.scatter.test.UQ <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.UQ$pos$corr,
+    clusters=clusters.test,
+    title="UQ vs. un-normalized",
+    xlab="un-normalized", 
+    ylab="UQ", 
+    threshold=0,
+    ccc=DANA.test$metrics["test.UQ", "cc"])
+  print(p.scatter.test.UQ)
+  
+  # Save plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_ScatterTMM.pdf"), p.scatter.test.TMM, width=4, height=4, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_ScatterUQ.pdf"), p.scatter.test.UQ, width=4, height=4, device="pdf")
+    # ggsave(paste0(settings$paper.fig.path, "MSK_CorrNeg.eps"), p.corr.neg, width = 8, height=3.5, device="eps")
+  }
+}
+```
+
+### All normalization methods for supplementary materials
+
+```{r generate.paper.figs.corr.scatter.all}
+if(settings$generate.paper.figs) {
+  par(mfrow=c(1,1))
+  
+  # un-normalized vs TMM
+  p.scatter.test.TMM <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TMM$pos$corr,
+    clusters=clusters.test, title="TMM", xlab="un-normalized", ylab="TMM", 
+    ccc=round(DANA.test$metrics["test.TMM", "cc"],2))
+  # un-normalized vs DESeq
+  p.scatter.test.DESeq <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.DESeq$pos$corr,
+    clusters=clusters.test, title="DESeq", xlab="un-normalized", ylab="DESeq", 
+    ccc=round(DANA.test$metrics["test.DESeq", "cc"],2))
+  # un-normalized vs PoissonSeq
+  p.scatter.test.PoissonSeq <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.PoissonSeq$pos$corr,
+    clusters=clusters.test, title="PoissonSeq", xlab="un-normalized", ylab="PoissonSeq", 
+    ccc=round(DANA.test$metrics["test.PoissonSeq", "cc"],2))
+  # un-normalized vs TC
+  p.scatter.test.TC <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.TC$pos$corr,
+    clusters=clusters.test, title="TC", xlab="un-normalized", ylab="TC", 
+    ccc=round(DANA.test$metrics["test.TC", "cc"],2))
+  # un-normalized vs Med
+  p.scatter.test.Med <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.Med$pos$corr,
+    clusters=clusters.test, title="Med", xlab="un-normalized", ylab="Med", 
+    ccc=round(DANA.test$metrics["test.Med", "cc"],2))
+  # un-normalized vs RUVg
+  p.scatter.test.RUVg <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVg$pos$corr,
+    clusters=clusters.test, title="RUVg", xlab="un-normalized", ylab="RUVg", 
+    ccc=round(DANA.test$metrics["test.RUVg", "cc"],2))
+  # un-normalized vs RUVs
+  p.scatter.test.RUVs <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVs$pos$corr,
+    clusters=clusters.test, title="RUVs", xlab="un-normalized", ylab="RUVs", 
+    ccc=round(DANA.test$metrics["test.RUVs", "cc"],2))
+  # un-normalized vs RUVr
+  p.scatter.test.RUVr <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.RUVr$pos$corr,
+    clusters=clusters.test, title="RUVr", xlab="un-normalized", ylab="RUVr", 
+    ccc=round(DANA.test$metrics["test.RUVr", "cc"],2))
+  # un-normalized vs UQ
+  p.scatter.test.UQ <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.UQ$pos$corr,
+    clusters=clusters.test, title="UQ", xlab="un-normalized", ylab="UQ", 
+    ccc=round(DANA.test$metrics["test.UQ", "cc"],2))
+  # un-normalized vs QN
+  p.scatter.test.QN <- plot.corr.scatter(
+    corr1=DANA.test$data.model$pos$corr, 
+    corr2=DANA.test$norm.models$test.QN$pos$corr,
+    clusters=clusters.test, title="QN", xlab="un-normalized", ylab="QN", 
+    ccc=round(DANA.test$metrics["test.QN", "cc"],2))
+  
+  p.scatter.test.all <- plot_grid(p.scatter.test.TMM,
+                                  p.scatter.test.DESeq,
+                                  p.scatter.test.PoissonSeq,
+                                  p.scatter.test.TC,
+                                  p.scatter.test.Med,
+                                  p.scatter.test.RUVg,
+                                  p.scatter.test.RUVs,
+                                  p.scatter.test.RUVr,
+                                  p.scatter.test.UQ,
+                                  p.scatter.test.QN,
+                                  ncol = 3,
+                                  align="hv")
+  plot(p.scatter.test.all)
+  
+  # Save plots
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_Scatter_All.pdf"), p.scatter.test.all, width=9, height=12, device="pdf")
+  }
+}
+```
+
+
+## DANA Result Metrics
+
+
+```{r generate.paper.figs.result.metrics}
+if(settings$generate.paper.figs) { 
+  options(scipen=4) # force non-scientific notation of x axis
+  
+  
+  test.DANA.metrics <- data.frame(
+    method=substr(rownames(DANA.test$metrics), 6, 20),
+    cc=DANA.test$metrics[, "cc"],
+    mcr=DANA.test$metrics[, "mcr"]
+  )
+  
+  p.metrics.test <- ggplot(test.DANA.metrics,aes(x=mcr,y=cc, label=method)) + 
+    geom_point(alpha=.5) +
+    theme_classic() + 
+    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    ylab(TeX("$cc^+$; Biological signal preservation")) + 
+    geom_text_repel(aes(label = method), size=3) +
+    # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
+    scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
+                       breaks = scales::pretty_breaks(n = 5)) +
+    # ylim(c(0,1)) 
+    scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.metrics.test)
+  
+  print("DANA Statistics for test data")
+  test.DANA.metrics$cc <- round(test.DANA.metrics$cc,3)
+  test.DANA.metrics$mcr <- round(test.DANA.metrics$mcr,3)
+  print(test.DANA.metrics)
+  
+  
+  bench.DANA.metrics <- data.frame(
+    method=substr(rownames(DANA.bench$metrics), 11, 30),
+    cc=DANA.bench$metrics[, "cc"],
+    mcr=DANA.bench$metrics[, "mcr"]
+  )
+  
+  p.metrics.bench <- ggplot(bench.DANA.metrics, aes(x=mcr, y=cc, label=method)) + 
+    geom_point(alpha=.5) +
+    theme_classic() + 
+    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    ylab(TeX("$cc^+$; Biological signal preservation")) + 
+    geom_text_repel(aes(label = method), size=3) +
+    # xlim(c(min(c(0,bench.mposc.reduction)),max(bench.mposc.reduction))) +
+    scale_x_continuous(labels = scales::percent, limits=c(0, 1.05),
+                       breaks = scales::pretty_breaks(n = 5)) +
+    # ylim(c(0,1))
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) 
+  print(p.metrics.bench)
+  print("DANA Statistics for benchmark data")
+  bench.DANA.metrics$cc <- round(bench.DANA.metrics$cc,3)
+  bench.DANA.metrics$mcr <- round(bench.DANA.metrics$mcr,3)
+  print(bench.DANA.metrics)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_MetricsTest.pdf"), p.metrics.test, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_MetricsBench.pdf"), p.metrics.bench, width=4.5, height=3.5, device="pdf")
+  }
+  
+}
+```
+
+## DEA Results
+
+```{r generate.paper.figs.DEA}
+if(settings$generate.paper.figs && settings$perform.DEA) { 
+  # FNR-FDR Plot
+  test.DEA.res <- data.frame(method=substr(names(test.norm.DEA.stats), 6, 20),
+                             FDR=-sapply(test.norm.DEA.stats, function(x) x$FDR)+1,
+                             FNR=-sapply(test.norm.DEA.stats, function(x) x$FNR)+1)
+  p.test.DEA.FNR.FDR <- ggplot(test.DEA.res, aes(x=FNR, y=FDR, label=method)) +
+      theme_classic() + 
+      geom_point(alpha=1) + 
+      xlab("Sensitivity") + # True positive rate(1-FNR)
+      ylab("Precision") + # Positive predictive value (1-FDR)
+      geom_text_repel(aes(label = method), size=3) +
+      scale_x_continuous(labels = scales::percent, limits=c(0,1),
+                         breaks = scales::pretty_breaks(n = 4)) +
+      scale_y_continuous(labels = scales::percent, limits = c(0,1))
+  print(p.test.DEA.FNR.FDR)
+  
+  # CAT Plot
+  d <- append(list("test.No Norm"=test.DEA), test.norm.DEA)
+  names(d) <- substr(names(d), 6, 20)
+  p.test.DEA.CAT.1 <- plot.CAT(DEA=d[1:7], 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=100)
+  print(p.test.DEA.CAT.1)
+  p.test.DEA.CAT.2 <- plot.CAT(DEA=d[c(1,8:11)], 
+                             truth.DEA=bench.DEA, 
+                             title="Significance ranks of miRNAs",
+                             maxrank=100)
+  print(p.test.DEA.CAT.2)
+  rm(d)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_DEA_FNR_FDR.pdf"), p.test.DEA.FNR.FDR, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_DEA_CAT.pdf"), p.test.DEA.CAT, width=4.5, height=3.5, device="pdf")
+  }
+}
+```
+
+
+
+## DANA results for different choices of control cutoffs
+
+```{r generate.paper.figs.cutoffs}
+if(settings$generate.paper.figs && settings$compare.cutoffs) { 
+  # Mean sd plots
+  p.meanvar.conf1 <- plot.mean.sd(test.RC, cutoff.conf1$t.zero, 
+                                  cutoff.conf1$t.poor, cutoff.conf1$t.well) 
+  p.meanvar.conf2 <- plot.mean.sd(test.RC, cutoff.conf2$t.zero, 
+                                  cutoff.conf2$t.poor, cutoff.conf2$t.well)
+  p.meanvar.conf3 <- plot.mean.sd(test.RC, cutoff.conf3$t.zero, 
+                                  cutoff.conf3$t.poor, cutoff.conf3$t.well)
+  
+  # RC histograms
+  p.RC.conf1 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf1$t.zero, 
+                               cutoff.conf1$t.poor, cutoff.conf1$t.well) +
+    annotate("label", alpha=0.5, x=10, y=75, hjust=0, vjust=0, size=2.75,
+             label=paste0(" neg. control: [",cutoff.conf1$t.zero ,", ",cutoff.conf1$t.poor, "] \n pos. control: [",cutoff.conf1$t.well ,", inf] "))
+  p.RC.conf2 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf2$t.zero, 
+                               cutoff.conf2$t.poor, cutoff.conf2$t.well) +
+    annotate("label", alpha=0.5, x=10, y=75, hjust=0, vjust=0, size=2.75,
+             label=paste0(" neg. control: [",cutoff.conf2$t.zero ,", ",cutoff.conf2$t.poor, "] \n pos. control: [",cutoff.conf2$t.well ,", inf] "))
+  p.RC.conf3 <- plot.countHist(test.RC, binwidth = 0.1, cutoff.conf3$t.zero, 
+                               cutoff.conf3$t.poor, cutoff.conf3$t.well) +
+    annotate("label", alpha=0.5, x=10, y=75, hjust=0, vjust=0, size=2.75,
+             label=paste0(" neg. control: [",cutoff.conf3$t.zero ,", ",cutoff.conf3$t.poor, "] \n pos. control: [",cutoff.conf3$t.well ,", inf] "))
+  
+  # DANA result metrics
+  p.result.DANA.1 <- plot.DANA.metrics(DANA.1$metrics, label.repel = TRUE, label.size=2.5)
+  p.result.DANA.2 <- plot.DANA.metrics(DANA.2$metrics, label.repel = TRUE, label.size=2.5)
+  p.result.DANA.3 <- plot.DANA.metrics(DANA.3$metrics, label.repel = TRUE, label.size=2.5)
+  
+  p.cutoffs <-
+    plot_grid(p.RC.conf1,
+              p.RC.conf2 + labs(x="Mean", y=element_blank()),
+              p.RC.conf3 + labs(x="Mean", y=element_blank()),
+              p.meanvar.conf1,
+              p.meanvar.conf2 + labs(x="Mean", y=element_blank()),
+              p.meanvar.conf3 + labs(x="Mean", y=element_blank()),
+              p.result.DANA.1,
+              p.result.DANA.2 + labs(y=element_blank()),
+              p.result.DANA.3 + labs(y=element_blank()),
+              align="hv",
+              labels=c("a","b","c"))
+  print(p.cutoffs)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_Test_Cutoff_Comparison.pdf"), p.cutoffs, width=10, height=10, device="pdf")
+  }
+}
+```
+
+
+## DANA Results for different partial correlation estimation methods
+
+```{r generate.paper.figs.compare.corr.methods}
+if(settings$generate.paper.figs && settings$compare.corr.methods) { 
+  methods.name <- c("mb (bic)", "mb (aic)", "mb (cv)","mb (av)", "glasso (ric)", "glasso (stars)", "huge.mb (ric)", "huge.mb (stars)", "fastggm", "pearson", "spearman")
+  
+  ## Between method correlation
+  # Compute pearson correlation between cc+ for different methods
+  compare.test.cc <- cbind(DANA.test.mb.bic.res$metrics$cc,
+                           DANA.test.mb.aic.res$metrics$cc,
+                           DANA.test.mb.cv.res$metrics$cc,
+                           DANA.test.mb.av.res$metrics$cc,
+                           DANA.test.glasso.ric.res$metrics$cc,
+                           DANA.test.glasso.stars.res$metrics$cc,
+                           DANA.test.huge.mb.ric.res$metrics$cc,
+                           DANA.test.huge.mb.stars.res$metrics$cc,
+                           DANA.test.fastggm.res$metrics$cc,
+                           DANA.test.pearson.res$metrics$cc,
+                           DANA.test.spearman.res$metrics$cc)
+  rownames(compare.test.cc) <- rownames(DANA.test.mb.bic.res$metrics)
+  colnames(compare.test.cc) <- methods.name
+  p.pcorr.cc.corr <- corrplot.mixed(cor(compare.test.cc),lower="circle",upper="number")
+  p.pcorr.cc.corr <- ggcorrplot(cor(compare.test.cc), type="upper", lab=TRUE)
+  plot(p.pcorr.cc.corr)
+  
+  
+  
+  ## Display result statistics plot
+  # MB (bic)
+  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (bic)") + theme(plot.title = element_text(size=12))
+  # MB (aic)
+  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (aic)") + theme(plot.title = element_text(size=12))
+  # MB (cv)
+  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (cv)") + theme(plot.title = element_text(size=12))
+  # MB (av)
+  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (av)") + theme(plot.title = element_text(size=12))
+  # glasso (ric)
+  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (ric)") + theme(plot.title = element_text(size=12))
+  # glasso (stars)
+  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (stars)") + theme(plot.title = element_text(size=12))
+  # huge.mb (ric)
+  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("huge.mb (ric)") + theme(plot.title = element_text(size=12))
+  # huge.mb (stars)
+  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("huge.mb (stars)") + theme(plot.title = element_text(size=12))
+  # FastGGM
+  p.test.fastggm.stats <- plot.DANA.metrics(DANA.test.fastggm.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("FastGGM") + theme(plot.title = element_text(size=12))
+  # Pearson
+  p.test.pearson.stats <- plot.DANA.metrics(DANA.test.pearson.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("Pearson") + theme(plot.title = element_text(size=12))
+  # Spearman
+  p.test.spearman.stats <- plot.DANA.metrics(DANA.test.spearman.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("Spearman") + theme(plot.title = element_text(size=12))
+  
+  # Plot
+  p.partialCorr.compare.metrics <-
+    plot_grid(p.test.mb.bic.stats + labs(x="mcr-", y="cc+"),
+              p.test.mb.aic.stats + labs(x="mcr-", y=element_blank()),
+              p.test.mb.cv.stats + labs(x="mcr-", y=element_blank()),
+              p.test.mb.av.stats + labs(x="mcr-", y="cc+"),
+              p.test.glasso.ric.stats + labs(x="mcr-", y=element_blank()),
+              p.test.glasso.stars.stats + labs(x="mcr-", y=element_blank()),
+              p.test.huge.mb.ric.stats + labs(x="mcr-", y="cc+"),
+              p.test.huge.mb.stars.stats + labs(x="mcr-", y=element_blank()),
+              p.test.fastggm.stats + labs(x="mcr-", y=element_blank()),
+              p.test.pearson.stats + labs(x="mcr-", y="cc+"),
+              p.test.spearman.stats + labs(x="mcr-", y=element_blank()),
+              ncol=3,
+              align="hv")
+  plot(p.partialCorr.compare.metrics)
+  
+  ## Correlation Plots
+  p.corr.mb.bic <- ggplot.corr(DANA.test.mb.bic.res$data.model$pos$corr, clusters, title="mb (bic)")
+  p.corr.mb.aic <- ggplot.corr(DANA.test.mb.aic.res$data.model$pos$corr, clusters, title="mb (aic)")
+  p.corr.mb.cv <- ggplot.corr(DANA.test.mb.cv.res$data.model$pos$corr, clusters, title="mb (cv)")
+  p.corr.mb.av <- ggplot.corr(DANA.test.mb.av.res$data.model$pos$corr, clusters, title="mb (av)")
+  p.corr.glasso.ric <- ggplot.corr(DANA.test.glasso.ric.res$data.model$pos$corr, clusters, title="glasso (ric)")
+  p.corr.glasso.stars <- ggplot.corr(DANA.test.glasso.stars.res$data.model$pos$corr, clusters, title="glasso (stars)")  
+  p.corr.huge.mb.ric <- ggplot.corr(DANA.test.huge.mb.ric.res$data.model$pos$corr, clusters, title="huge.mb (ric)")
+  p.corr.huge.mb.stars <- ggplot.corr(DANA.test.huge.mb.stars.res$data.model$pos$corr, clusters, title="huge.mb (stars)")
+  p.corr.fastggm <- ggplot.corr(DANA.test.fastggm.res$data.model$pos$corr, clusters, title="FastGGM")
+  p.corr.pearson <- ggplot.corr(DANA.test.pearson.res$data.model$pos$corr, clusters, title="Pearson")
+  p.corr.spearman <- ggplot.corr(DANA.test.spearman.res$data.model$pos$corr, clusters, title="Spearman")
+  
+  # Plot
+  p.partialCorr.compare.pcorrs <-
+    plot_grid(p.corr.mb.bic + theme(legend.position="none"),
+              p.corr.mb.aic + theme(legend.position="none"),
+              p.corr.mb.cv + theme(legend.position="none"),
+              p.corr.mb.av + theme(legend.position="none"),
+              p.corr.glasso.ric + theme(legend.position="none"),
+              p.corr.glasso.stars + theme(legend.position="none"),
+              p.corr.huge.mb.ric + theme(legend.position="none"),
+              p.corr.huge.mb.stars + theme(legend.position="none"),
+              p.corr.fastggm + theme(legend.position="none"),
+              p.corr.pearson + theme(legend.position="none"),
+              p.corr.spearman + theme(legend.position="none"),
+              get.legend(p.corr.mb.bic + theme(legend.position = "bottom")),
+              ncol=3)
+  plot(p.partialCorr.compare.pcorrs)
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_PCorr_Comparison_Metrics.pdf"), p.partialCorr.compare.metrics, width=9, height=12, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_PCorr_Comparison_CC_Corr.pdf"), p.pcorr.cc.corr, width=7, height=7, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "MSK_PCorr_Corr_All.pdf"), p.partialCorr.compare.pcorrs, width=9, height=12, device="pdf")
+  }
+}
+```
+
+
+
+
+
+# Package Information
+
+```{r session.info}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
