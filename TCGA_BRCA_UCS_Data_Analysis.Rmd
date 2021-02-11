@@ -1,5 +1,5 @@
 ---
-title: "Assessment of Normalization Methods for TCGA Data"
+title: "Assessment of Normalization Methods for TCGA-BRCA and TCGA-UCS Data"
 author: "Yannick Dueren, Johannes Lederer, Li-Xuan Qin"
 output: 
   html_document:
@@ -33,7 +33,7 @@ settings <- list(
   # Specify if paper figures are exported
   export.figures = T,
   # Path for file exports
-  paper.fig.path = "../../danawriteup/figs/",
+  paper.fig.path = "../danawriteup/figs/",
   # Clears environment
   debug=TRUE
 )
@@ -53,8 +53,6 @@ Remember to *always set the working directory* and the paths to the data/externa
 
 ```{r configuration}
 config <- list(
-  # working directory
-  working.dir = "C:/Users/Yannick/Google Drive/projects/normalization/paperSupplement",
   DANA.path = "./R/DANA.R",
   
   ## Data
@@ -140,8 +138,6 @@ config.DEA <- list(
 Load all required R libraries/packages.
 
 ```{r load.packages, results='hide', message=FALSE}
-# Set working directory
-setwd(config$working.dir)
 # DANA functions
 source(config$DANA.path)
 # Libraries
