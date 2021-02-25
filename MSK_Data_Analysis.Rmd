@@ -1781,6 +1781,7 @@ if(settings$generate.paper.figs) {
     theme(legend.position=c(0.9,0.86), 
           legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.5))) +
+    theme(legend.key.width = unit(1.25,"cm")) +
     ylab("Frequency") +
     xlab("Marginal correlation") #+ ggtitle("Positive correlation among negative controls")
   print(p.density.neg.nnz.freq)
@@ -2155,14 +2156,14 @@ if(settings$generate.paper.figs && settings$compare.cutoffs) {
   p.result.DANA.3 <- plot.DANA.metrics(DANA.3$metrics, label.repel = TRUE, label.size=2.5)
   
   p.cutoffs <-
-    plot_grid(p.RC.conf1,
-              p.RC.conf2 + labs(x="Mean", y=element_blank()),
+    plot_grid(p.RC.conf2,
+              p.RC.conf1 + labs(x="Mean", y=element_blank()),
               p.RC.conf3 + labs(x="Mean", y=element_blank()),
-              p.meanvar.conf1,
-              p.meanvar.conf2 + labs(x="Mean", y=element_blank()),
+              p.meanvar.conf2,
+              p.meanvar.conf1 + labs(x="Mean", y=element_blank()),
               p.meanvar.conf3 + labs(x="Mean", y=element_blank()),
-              p.result.DANA.1,
-              p.result.DANA.2 + labs(y=element_blank()),
+              p.result.DANA.2,
+              p.result.DANA.1 + labs(y=element_blank()),
               p.result.DANA.3 + labs(y=element_blank()),
               align="hv",
               labels=c("a","b","c"))
