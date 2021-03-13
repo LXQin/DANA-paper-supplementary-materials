@@ -29,9 +29,9 @@ settings <- list(
   # Application of the full DANA pipeline to the test data
   test.DANA=T,
   # Generate interactive plots of co-expression structures
-  investigate.coexpression=F,
+  investigate.coexpression=T,
   # Comparison of coexpression estimation methods
-  compare.corr.methods=F,
+  compare.corr.methods=T,
   # Full Pipeline comparison of two correlation methods
   compare.two.methods=F,
   # Compare DANA results for different cutoff choices
@@ -41,7 +41,7 @@ settings <- list(
   # Generate paper figures
   generate.paper.figs=T,
   # Specify if paper figures are exported
-  export.figures = T,
+  export.figures = F,
   # Path for file exports
   paper.fig.path = "../danawriteup/figs/",
   # Clears environment
@@ -547,28 +547,28 @@ if(settings$compare.corr.methods) {
   
   ## Display result statistics plot
   # MB (bic)
-  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE) + ggtitle("mb (bic)")
+  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE) + ggtitle("MB (BIC)")
   print(p.test.mb.bic.stats)
   # MB (aic)
-  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE) + ggtitle("mb (aic)")
+  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE) + ggtitle("MB (AIC)")
   print(p.test.mb.aic.stats)
   # MB (cv)
-  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE) + ggtitle("mb (cv)")
+  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE) + ggtitle("MB (CV)")
   print(p.test.mb.cv.stats)
   # MB (av)
-  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE) + ggtitle("mb (av)")
+  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE) + ggtitle("MB (AV)")
   print(p.test.mb.av.stats)
   # glasso (ric)
-  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE) + ggtitle("glasso (ric)")
+  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE) + ggtitle("glasso (RIC)")
   print(p.test.glasso.ric.stats)
   # glasso (stars)
-  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE) + ggtitle("glasso (stars)")
+  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE) + ggtitle("glasso (StARS)")
   print(p.test.glasso.stars.stats)
   # huge.mb (ric)
-  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE) + ggtitle("huge.mb (ric)")
+  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE) + ggtitle("MB (RIC)")
   print(p.test.huge.mb.ric.stats)
   # huge.mb (stars)
-  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE) + ggtitle("huge.mb (stars)")
+  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE) + ggtitle("MB (StARS)")
   print(p.test.huge.mb.stars.stats)
   # FastGGM
   p.test.fastggm.stats <- plot.DANA.metrics(DANA.test.fastggm.res$metrics, label.repel=TRUE) + ggtitle("FastGGM")
@@ -1307,7 +1307,7 @@ if(settings$generate.paper.figs) {
           # legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.9))) +
     scale_y_continuous(breaks=c(-50,0,50), labels=c(50,0,50), limits=c(-95,95)) +
-    xlab("Mean") +
+    xlab("Mean log2(read count)") +
     ylab("Frequency")
     # theme(panel.border = element_blank(),
     #       axis.line = element_line(color = 'black'))
@@ -1589,15 +1589,15 @@ if(settings$generate.paper.figs) {
   p.corr.neg.bench <- ggplot.corr(corr.bench.neg, 
                                   clusters=clusters, 
                                   threshold=0, 
-                                  title="benchmark (un-normalized)")
+                                  title="  benchmark (un-normalized)")
   p.corr.neg.test <- ggplot.corr(corr.test.neg, 
                                  clusters=clusters, 
                                  threshold=0, 
-                                 title="test (un-normalized)")
+                                 title="  test (un-normalized)")
   p.corr.neg.test.norm <- ggplot.corr(corr.test.norm.neg, 
                                      clusters=clusters, 
                                      threshold=0, 
-                                     title="test (TMM)")
+                                     title="  test (TMM)")
   
   p.corr.neg <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
                             p.corr.neg.test + theme(legend.position="none"),
@@ -1753,7 +1753,7 @@ if(settings$generate.paper.figs) {
     xlim(0, 1) +
     scale_linetype_manual(values=c("solid", "solid", "twodash"))+
     scale_color_manual(values=c('#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
-    theme(legend.position=c(0.9,0.9), 
+    theme(legend.position=c(0.85,0.9), 
           legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.5))) +
     ylab("Frequency") +
@@ -1778,7 +1778,7 @@ if(settings$generate.paper.figs) {
     xlim(0, 1) +
     # scale_linetype_manual(values=c("twodash", "solid", "solid", "solid"))+
     scale_color_manual(values=c('#e7298a','#1B9E77','#D95F02', '#7570B3')) + # First colors from rcolorbrewer set "Dark2"
-    theme(legend.position=c(0.9,0.86), 
+    theme(legend.position=c(0.85,0.86), 
           legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.5))) +
     theme(legend.key.width = unit(1.25,"cm")) +
@@ -2157,11 +2157,11 @@ if(settings$generate.paper.figs && settings$compare.cutoffs) {
   
   p.cutoffs <-
     plot_grid(p.RC.conf2,
-              p.RC.conf1 + labs(x="Mean", y=element_blank()),
-              p.RC.conf3 + labs(x="Mean", y=element_blank()),
+              p.RC.conf1 + labs(x="Mean log2(read count)", y=element_blank()),
+              p.RC.conf3 + labs(x="Mean log2(read count)", y=element_blank()),
               p.meanvar.conf2,
-              p.meanvar.conf1 + labs(x="Mean", y=element_blank()),
-              p.meanvar.conf3 + labs(x="Mean", y=element_blank()),
+              p.meanvar.conf1 + labs(x="Mean log2(read count)", y=element_blank()),
+              p.meanvar.conf3 + labs(x="Mean log2(read count)", y=element_blank()),
               p.result.DANA.2,
               p.result.DANA.1 + labs(y=element_blank()),
               p.result.DANA.3 + labs(y=element_blank()),
@@ -2180,7 +2180,7 @@ if(settings$generate.paper.figs && settings$compare.cutoffs) {
 
 ```{r generate.paper.figs.compare.corr.methods}
 if(settings$generate.paper.figs && settings$compare.corr.methods) { 
-  methods.name <- c("mb (bic)", "mb (aic)", "mb (cv)","mb (av)", "glasso (ric)", "glasso (stars)", "huge.mb (ric)", "huge.mb (stars)", "fastggm", "pearson", "spearman")
+  methods.name <- c("MB (BIC)", "MB (AIC)", "MB (CV)","MB (AV)", "MB (RIC)", "MB (StARS)", "glasso (RIC)", "glasso (StARS)", "FastGGM", "Pearson", "Spearman")
   
   ## Between method correlation
   # Compute pearson correlation between cc+ for different methods
@@ -2188,10 +2188,10 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
                            DANA.test.mb.aic.res$metrics$cc,
                            DANA.test.mb.cv.res$metrics$cc,
                            DANA.test.mb.av.res$metrics$cc,
-                           DANA.test.glasso.ric.res$metrics$cc,
-                           DANA.test.glasso.stars.res$metrics$cc,
                            DANA.test.huge.mb.ric.res$metrics$cc,
                            DANA.test.huge.mb.stars.res$metrics$cc,
+                           DANA.test.glasso.ric.res$metrics$cc,
+                           DANA.test.glasso.stars.res$metrics$cc,
                            DANA.test.fastggm.res$metrics$cc,
                            DANA.test.pearson.res$metrics$cc,
                            DANA.test.spearman.res$metrics$cc)
@@ -2205,21 +2205,21 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
   
   ## Display result statistics plot
   # MB (bic)
-  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (bic)") + theme(plot.title = element_text(size=12))
+  p.test.mb.bic.stats <- plot.DANA.metrics(DANA.test.mb.bic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (BIC)") + theme(plot.title = element_text(size=12))
   # MB (aic)
-  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (aic)") + theme(plot.title = element_text(size=12))
+  p.test.mb.aic.stats <- plot.DANA.metrics(DANA.test.mb.aic.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (AIC)") + theme(plot.title = element_text(size=12))
   # MB (cv)
-  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (cv)") + theme(plot.title = element_text(size=12))
+  p.test.mb.cv.stats <- plot.DANA.metrics(DANA.test.mb.cv.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (CV)") + theme(plot.title = element_text(size=12))
   # MB (av)
-  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("mb (av)") + theme(plot.title = element_text(size=12))
-  # glasso (ric)
-  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (ric)") + theme(plot.title = element_text(size=12))
-  # glasso (stars)
-  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (stars)") + theme(plot.title = element_text(size=12))
+  p.test.mb.av.stats <- plot.DANA.metrics(DANA.test.mb.av.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (AV)") + theme(plot.title = element_text(size=12))
   # huge.mb (ric)
-  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("huge.mb (ric)") + theme(plot.title = element_text(size=12))
+  p.test.huge.mb.ric.stats <- plot.DANA.metrics(DANA.test.huge.mb.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (RIC)") + theme(plot.title = element_text(size=12))
   # huge.mb (stars)
-  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("huge.mb (stars)") + theme(plot.title = element_text(size=12))
+  p.test.huge.mb.stars.stats <- plot.DANA.metrics(DANA.test.huge.mb.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("MB (StARS)") + theme(plot.title = element_text(size=12))
+  # glasso (ric)
+  p.test.glasso.ric.stats <- plot.DANA.metrics(DANA.test.glasso.ric.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (RIC)") + theme(plot.title = element_text(size=12))
+  # glasso (stars)
+  p.test.glasso.stars.stats <- plot.DANA.metrics(DANA.test.glasso.stars.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("glasso (StARS)") + theme(plot.title = element_text(size=12))
   # FastGGM
   p.test.fastggm.stats <- plot.DANA.metrics(DANA.test.fastggm.res$metrics, label.repel=TRUE, label.size = 2.5) + ggtitle("FastGGM") + theme(plot.title = element_text(size=12))
   # Pearson
@@ -2233,10 +2233,10 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
               p.test.mb.aic.stats + labs(x="mcr-", y=element_blank()),
               p.test.mb.cv.stats + labs(x="mcr-", y=element_blank()),
               p.test.mb.av.stats + labs(x="mcr-", y="cc+"),
-              p.test.glasso.ric.stats + labs(x="mcr-", y=element_blank()),
-              p.test.glasso.stars.stats + labs(x="mcr-", y=element_blank()),
-              p.test.huge.mb.ric.stats + labs(x="mcr-", y="cc+"),
+              p.test.huge.mb.ric.stats + labs(x="mcr-", y=element_blank()),
               p.test.huge.mb.stars.stats + labs(x="mcr-", y=element_blank()),
+              p.test.glasso.ric.stats + labs(x="mcr-", y="cc+"),
+              p.test.glasso.stars.stats + labs(x="mcr-", y=element_blank()),
               p.test.fastggm.stats + labs(x="mcr-", y=element_blank()),
               p.test.pearson.stats + labs(x="mcr-", y="cc+"),
               p.test.spearman.stats + labs(x="mcr-", y=element_blank()),
@@ -2245,14 +2245,14 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
   plot(p.partialCorr.compare.metrics)
   
   ## Correlation Plots
-  p.corr.mb.bic <- ggplot.corr(DANA.test.mb.bic.res$data.model$pos$corr, clusters, title="mb (bic)")
-  p.corr.mb.aic <- ggplot.corr(DANA.test.mb.aic.res$data.model$pos$corr, clusters, title="mb (aic)")
-  p.corr.mb.cv <- ggplot.corr(DANA.test.mb.cv.res$data.model$pos$corr, clusters, title="mb (cv)")
-  p.corr.mb.av <- ggplot.corr(DANA.test.mb.av.res$data.model$pos$corr, clusters, title="mb (av)")
-  p.corr.glasso.ric <- ggplot.corr(DANA.test.glasso.ric.res$data.model$pos$corr, clusters, title="glasso (ric)")
-  p.corr.glasso.stars <- ggplot.corr(DANA.test.glasso.stars.res$data.model$pos$corr, clusters, title="glasso (stars)")  
-  p.corr.huge.mb.ric <- ggplot.corr(DANA.test.huge.mb.ric.res$data.model$pos$corr, clusters, title="huge.mb (ric)")
-  p.corr.huge.mb.stars <- ggplot.corr(DANA.test.huge.mb.stars.res$data.model$pos$corr, clusters, title="huge.mb (stars)")
+  p.corr.mb.bic <- ggplot.corr(DANA.test.mb.bic.res$data.model$pos$corr, clusters, title="MB (BIC)")
+  p.corr.mb.aic <- ggplot.corr(DANA.test.mb.aic.res$data.model$pos$corr, clusters, title="MB (AIC)")
+  p.corr.mb.cv <- ggplot.corr(DANA.test.mb.cv.res$data.model$pos$corr, clusters, title="MB (CV)")
+  p.corr.mb.av <- ggplot.corr(DANA.test.mb.av.res$data.model$pos$corr, clusters, title="MB (AV)")
+  p.corr.huge.mb.ric <- ggplot.corr(DANA.test.huge.mb.ric.res$data.model$pos$corr, clusters, title="MB (RIC)")
+  p.corr.huge.mb.stars <- ggplot.corr(DANA.test.huge.mb.stars.res$data.model$pos$corr, clusters, title="MB (StARS)")
+  p.corr.glasso.ric <- ggplot.corr(DANA.test.glasso.ric.res$data.model$pos$corr, clusters, title="glasso (RIC)")
+  p.corr.glasso.stars <- ggplot.corr(DANA.test.glasso.stars.res$data.model$pos$corr, clusters, title="glasso (StARS)")  
   p.corr.fastggm <- ggplot.corr(DANA.test.fastggm.res$data.model$pos$corr, clusters, title="FastGGM")
   p.corr.pearson <- ggplot.corr(DANA.test.pearson.res$data.model$pos$corr, clusters, title="Pearson")
   p.corr.spearman <- ggplot.corr(DANA.test.spearman.res$data.model$pos$corr, clusters, title="Spearman")
@@ -2263,10 +2263,10 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
               p.corr.mb.aic + theme(legend.position="none"),
               p.corr.mb.cv + theme(legend.position="none"),
               p.corr.mb.av + theme(legend.position="none"),
-              p.corr.glasso.ric + theme(legend.position="none"),
-              p.corr.glasso.stars + theme(legend.position="none"),
               p.corr.huge.mb.ric + theme(legend.position="none"),
               p.corr.huge.mb.stars + theme(legend.position="none"),
+              p.corr.glasso.ric + theme(legend.position="none"),
+              p.corr.glasso.stars + theme(legend.position="none"),
               p.corr.fastggm + theme(legend.position="none"),
               p.corr.pearson + theme(legend.position="none"),
               p.corr.spearman + theme(legend.position="none"),
@@ -2282,6 +2282,43 @@ if(settings$generate.paper.figs && settings$compare.corr.methods) {
 }
 ```
 
+
+## Arrange plots for paper
+
+```{r generate.paper.figs.arrange.for.paper}
+if(settings$generate.paper.figs) { 
+  top.row <-
+    plot_grid(NULL,
+              p.corr.pos.three,
+              NULL,
+              labels=c("", ""),
+              rel_heights = c(0.5 ,10, 0.2),
+              ncol=1)
+  bottom.row <- 
+    plot_grid(NULL,
+              p.scatter.test.TMM,
+              p.scatter.test.UQ,
+              NULL,
+              align="h",
+              labels=c("", "b", "", ""),
+              vjust = 0,
+              rel_widths = c(1,2.5,2.5,1),
+              nrow=1)
+  p.results.paper <- 
+    plot_grid(top.row, 
+              bottom.row,
+              # align="h",
+              labels=c("a", ""),
+              rel_heights = c(5,3.5),
+              ncol=1)
+  plot(p.results.paper)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "MSK_posCorr_results.pdf"), p.results.paper, width=8, height=6.5, device="pdf")
+  }
+}
+```
 
 
 

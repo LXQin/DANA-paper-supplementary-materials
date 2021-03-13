@@ -25,13 +25,13 @@ settings <- list(
   # If true sets all other settings to TRUE
   all=F,
   # Generate interactive plots of co-expression structures
-  investigate.coexpression=F,
+  investigate.coexpression=T,
   # Perform Differential Expression Analysis
   perform.DEA=T,
   # Generate paper figures
   generate.paper.figs=T,
   # Specify if paper figures are exported
-  export.figures = T,
+  export.figures = F,
   # Path for file exports
   paper.fig.path = "../danawriteup/figs/",
   # Clears environment
@@ -459,7 +459,7 @@ if(settings$generate.paper.figs) {
                  color="#E7298A") +
     annotate(geom="label", x=log2(config$t.well+1)+.5, y=630,
              label="pos. contr.", color="#E7298A", size=4, hjust=0, fill = alpha(c("white"),0.85), label.size = NA) +
-    xlab("Mean") +
+    xlab("Mean log2(read count)") +
     ylab("Frequency")
   print(p.RC.hist)
   
@@ -597,9 +597,9 @@ if(settings$generate.paper.figs) {
                             threshold=0, 
                             title="Un-normalized")
   p.corr.neg.DESeq <- ggplot.corr(corr.data.DESeq.neg, 
-                                clusters=clusters, 
-                                threshold=0, 
-                                title="DESeq")
+                                  clusters=clusters, 
+                                  threshold=0, 
+                                  title="DESeq")
   
   p.corr.neg.two <- arrangeGrob(p.corr.neg.DESeq + theme(legend.position="none"),
                                 p.corr.neg + theme(legend.position="none"),
@@ -947,7 +947,7 @@ if(settings$generate.paper.figs) {
     theme_classic() + 
     xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
     ylab(TeX("$cc^+$; Biological signal preservation")) + 
-    geom_text_repel(aes(label = method), size=3) +
+    geom_text_repel(aes(label = method), size=3, max.overlaps = Inf, min.segment.length = 0.2) +
     # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
     scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
                        breaks = scales::pretty_breaks(n = 5)) +

@@ -236,7 +236,7 @@ plot.mean.sd <- function(raw, tZero, tPoor, tWell, title, xlim.max=NA, ylim.max=
   
   p <- ggplot2::ggplot(df, ggplot2::aes(x=data.mean,y=data.var)) +
     ggplot2::geom_point(alpha=.25) +
-    ggplot2::xlab("Mean") +
+    ggplot2::xlab("Mean log2(read count)") +
     ggplot2::ylab("Standard deviation") +
     vline.t.zero +
     vline.t.poor +
@@ -296,7 +296,7 @@ plot.countHist <- function(raw, binwidth=0.1, tZero, tPoor, tWell, title, xlim.m
   df <- data.frame(log.expression = log2(rowMeans(raw) + 1))
   p <- ggplot2::ggplot(df, ggplot2::aes(x=log.expression)) +
     ggplot2::geom_histogram(binwidth = binwidth, color="black", fill="black") +
-    ggplot2::xlab("Mean") +
+    ggplot2::xlab("Mean log2(read count)") +
     ggplot2::ylab("Frequency") +
     vline.t.zero +
     vline.t.poor +
@@ -332,7 +332,9 @@ plot.DANA.metrics <- function(metrics, label.size=3, label.repel=FALSE) {
     ggplot2::geom_point(alpha=.75)
   
   if(label.repel) {
-    p <- p + ggrepel::geom_text_repel(ggplot2::aes(label = method), size=label.size)
+    p <- p + ggrepel::geom_text_repel(ggplot2::aes(label = method), 
+                                      size=label.size, 
+                                      max.overlaps = Inf)
   } else {
     p <- p + ggplot2::geom_text(size=label.size, hjust=0, vjust=0)
   }

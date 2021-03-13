@@ -29,7 +29,7 @@ settings <- list(
   # Application of the full DANA pipeline to the test data
   test.DANA=T,
   # Generate interactive plots of co-expression structures
-  investigate.coexpression=F,
+  investigate.coexpression=T,
   # Perform Differential Expression Analysis for test and benchmark data sets
   perform.DEA=T,
   # Generate paper figures
@@ -671,7 +671,7 @@ if(settings$generate.paper.figs) {
           # legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.9))) +
     scale_y_continuous(breaks=c(-200,-150,-100,-50,0,50,100,150,200), labels=c(200,150,100,50,0,50,100,150,200), limits=c(-200,200)) +
-    xlab("Mean") +
+    xlab("Mean log2(read count)") +
     ylab("Frequency")
   print(p.RC.hist)
   rm(df)
@@ -998,10 +998,7 @@ if(settings$generate.paper.figs) {
 if(settings$generate.paper.figs) { 
   p.corr.test <- ggplot.corr(DANA.test$data.model$pos$corr,
                              clusters=clusters,
-                             title="un-normalized")
-  p.corr.bench <- ggplot.corr(DANA.bench$data.model$pos$corr,
-                              clusters=clusters,
-                              title="benchmark data (un-normalized)")
+                             title="mixed-batch (un-normalized)")
   p.corr.TMM <- ggplot.corr(DANA.test$norm.models$test.TMM$pos$corr,
                             clusters=clusters,
                             title="TMM")
@@ -1033,20 +1030,38 @@ if(settings$generate.paper.figs) {
                             clusters=clusters,
                             title="QN")
   
+  # single-batch data
+  DANA.bench.plot <- DANA(data.RC=bench.RC, 
+                     data.norm=bench.norm, 
+                     pos.controls=pos.controls.test, 
+                     neg.controls=neg.controls.bench, 
+                     clusters=clusters.test,
+                     coords=coords,
+                     case.name="benchmark",
+                     generate.plots=config$generate.plots,
+                     preprocess.transform=config$preprocess.transform,
+                     corr.method.pos=config$corr.method.pos,
+                     tuning.criterion.pos=config$tuning.criterion.pos,
+                     corr.method.neg=config$corr.method.neg,
+                     tuning.criterion.neg=config$tuning.criterion.neg) 
+  p.corr.bench <- ggplot.corr(DANA.bench.plot$data.model$pos$corr,
+                              clusters=clusters,
+                              title="single-batch (un-normalized)")
+  
   # Arrange plots
   p.corr.test.all <-
-    plot_grid(p.corr.test + theme(legend.position="none"),
+    plot_grid(p.corr.bench + theme(legend.position="none"),
+              p.corr.test + theme(legend.position="none"),
               p.corr.TMM + theme(legend.position="none"),
               p.corr.DESeq + theme(legend.position="none"),
               p.corr.PoissonSeq + theme(legend.position="none"),
-              p.corr.TC + theme(legend.position="none"),
-              p.corr.Med + theme(legend.position="none"),
+              p.corr.QN + theme(legend.position="none"),
               p.corr.RUVg + theme(legend.position="none"),
               p.corr.RUVs + theme(legend.position="none"),
               p.corr.RUVr + theme(legend.position="none"),
+              p.corr.Med + theme(legend.position="none"),
+              p.corr.TC + theme(legend.position="none"),
               p.corr.UQ + theme(legend.position="none"),
-              p.corr.QN + theme(legend.position="none"),
-              get.legend(p.corr.test + theme(legend.position = "bottom")),
               ncol=3)
   plot(p.corr.test.all)
   
@@ -1352,6 +1367,7 @@ if(settings$generate.paper.figs) {
     clusters=clusters.test, title="QN", xlab="un-normalized", ylab="QN", 
     ccc=round(DANA.test$metrics["test.QN", "cc"],3))
   
+  
   p.scatter.test.all <- plot_grid(p.scatter.test.TMM,
                                   p.scatter.test.DESeq,
                                   p.scatter.test.PoissonSeq,
@@ -1388,11 +1404,11 @@ if(settings$generate.paper.figs) {
   )
   
   p.metrics.test <- ggplot(test.DANA.metrics,aes(x=mcr,y=cc, label=method)) + 
-    geom_point(alpha=.5) +
+    geom_point(alpha=.5) + #pos=position_jitter(width=0.001, seed=1),
     theme_classic() + 
     xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
     ylab(TeX("$cc^+$; Biological signal preservation")) + 
-    geom_text_repel(aes(label = method), size=3) +
+    geom_text_repel(aes(label = method), size=3, max.overlaps = Inf, min.segment.length = 0.2, force = 1, box.padding = 0.2) +
     # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
     scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
                        breaks = scales::pretty_breaks(n = 5)) +
@@ -1450,10 +1466,10 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
                              FNR=-sapply(test.norm.DEA.stats, function(x) x$FNR)+1)
   p.test.DEA.FNR.FDR <- ggplot(test.DEA.res, aes(x=FNR, y=FDR, label=method)) +
       theme_classic() + 
-      geom_point(alpha=1) + 
+      geom_point(alpha=.5) + 
       xlab("Sensitivity") + # True positive rate(1-FNR)
       ylab("Precision") + # Positive predictive value (1-FDR)
-      geom_text_repel(aes(label = method), size=3) +
+      geom_text_repel(aes(label = method), size=3, max.overlaps = Inf) + 
       scale_x_continuous(labels = scales::percent, limits=c(0,1),
                          breaks = scales::pretty_breaks(n = 4)) +
       scale_y_continuous(labels = scales::percent, limits = c(0,1))
@@ -1481,6 +1497,25 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
 }
 ```
 
+## Arrange plots for paper
+
+```{r generate.paper.figs.arrange.for.paper}
+if(settings$generate.paper.figs && settings$perform.DEA) { 
+  p.results.paper <- 
+    plot_grid(p.RC.hist, 
+              p.meanvar.test + labs(title = NULL),
+              p.metrics.test + ggtitle("DANA Metrics"),
+              p.test.DEA.FNR.FDR + ggtitle("Differential Expression Assessment"),
+              align="hv",
+              labels=c("a", "b", "c", "d"))
+  plot(p.results.paper)
+  
+  
+  if(settings$export.figures) {
+    ggsave(paste0(settings$paper.fig.path, "UCEC_Results.pdf"), p.results.paper, width=9, height=7.5, device="pdf")
+  }
+}
+```
 
 
 
