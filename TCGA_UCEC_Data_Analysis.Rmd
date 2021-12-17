@@ -1,12 +1,11 @@
 ---
-title: "Assessment of Normalization Methods for TCGA-UCEC Data"
+title: "DANA Normalization Assessment for TCGA-UCEC Data"
 author: "Yannick Dueren, Johannes Lederer, Li-Xuan Qin"
 output: 
   html_document:
     toc: true
     toc_depth: 4
     toc_float: true
-# abstract: "TODO: This is the abstract."
 knit: (function(inputFile, encoding) {
   rmarkdown::render(inputFile, encoding = encoding, output_dir = "results") })
 ---
@@ -18,18 +17,16 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Setup
 
-The settings list `settings` configure which parts, simulations, and analysis steps of this R markdown are executed. This way single components of the analysis can be disabled for the purpose of saving computation time. Setting `settings$all` to `TRUE` will set all other options to true regardless of their value.
+The settings list `settings` configure which parts, simulations, and analysis steps of this R markdown are executed. This way single components of the analysis can be disabled for the purpose of saving computation time. 
 
 ```{r analysis.settings}
 settings <- list(
-  # If true sets all other settings to TRUE
-  all=F,
   # Application of the full DANA pipeline to the benchmark data
   bench.DANA=T,
   # Application of the full DANA pipeline to the test data
   test.DANA=T,
   # Generate interactive plots of co-expression structures
-  investigate.coexpression=T,
+  investigate.coexpression=F,
   # Perform Differential Expression Analysis for test and benchmark data sets
   perform.DEA=T,
   # Generate paper figures
@@ -41,16 +38,6 @@ settings <- list(
   # Clears environment
   debug=TRUE
 )
-if(settings$all) {
-  settings$bench.DANA=TRUE
-  settings$test.DANA=TRUE
-  settings$investigate.coexpression=TRUE
-  settings$generate.paper.figs=TRUE
-}
-if(settings$generate.paper.figs) {
-  settings$bench.DANA=TRUE
-  settings$test.DANA=TRUE
-}
 if(settings$debug) rm(list=ls()[ls()!="settings"])
 ```
 
@@ -664,11 +651,8 @@ if(settings$generate.paper.figs) {
                  color="#E7298A") +
     annotate(geom="label", x=log2(config$t.well+1)+.5, y=200,
              label="pos. contr.", color="#E7298A", size=4, hjust=0, fill = alpha(c("white"),0.85), label.size = NA) +
-    # ylim(c(-90,90)) +
     scale_fill_manual(name="Data set",values=c("#404080", "#69b3a2"), labels=c("single-batch", "mixed-batch"), guide = guide_legend(reverse=TRUE)) +
-    # ggtitle("log2(Read count + 1)") +
     theme(legend.position=c(0.86,0.86), 
-          # legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.9))) +
     scale_y_continuous(breaks=c(-200,-150,-100,-50,0,50,100,150,200), labels=c(200,150,100,50,0,50,100,150,200), limits=c(-200,200)) +
     xlab("Mean log2(read count)") +
@@ -903,7 +887,6 @@ if(settings$generate.paper.figs) {
   pos.controls.common <- intersect(pos.controls.test, pos.controls.bench)
   neg.controls.bench <- rownames(bench.model$neg$corr)
   neg.controls.test <- rownames(test.model$neg$corr)
-  # neg.controls.common <- intersect(neg.controls.test, neg.controls.bench)
   # reduce the number of genes for the plot
   num.genes.plot.pos <- min(num.genes.plot.pos, length(pos.controls.common))
   pos.controls.plot <- pos.controls.common[1:num.genes.plot.pos]
@@ -942,7 +925,7 @@ if(settings$generate.paper.figs) {
                             p.corr.pos.test + theme(legend.position="none"),
                             get.legend(p.corr.pos.bench), 
                             widths = c(2,2,1))
-  grid.arrange(p.corr.pos)  # plot
+  grid.arrange(p.corr.pos)  # display plot
   
   p.corr.pos.three <- arrangeGrob(p.corr.pos.bench + theme(legend.position="none"), 
                                   p.corr.pos.test.TMM + theme(legend.position="none"),
@@ -950,7 +933,7 @@ if(settings$generate.paper.figs) {
                                   get.legend(p.corr.pos.bench + theme(legend.position = "bottom")),
                                   layout_matrix=rbind(c(1,2,3), c(4,4,4)),
                                   heights = c(5,1))
-  grid.arrange(p.corr.pos.three)  # plot
+  grid.arrange(p.corr.pos.three)  # display plot
   
   # Negative controls
   p.corr.neg.bench <- ggplot.corr(corr.bench.neg, 
@@ -970,7 +953,7 @@ if(settings$generate.paper.figs) {
                             p.corr.neg.test + theme(legend.position="none"),
                             get.legend(p.corr.neg.bench),
                             widths = c(2,2,1))
-  grid.arrange(p.corr.neg)  # plot
+  grid.arrange(p.corr.neg)  # display plot
   
   
   p.corr.neg.three <- arrangeGrob(p.corr.neg.bench + theme(legend.position="none"), 
@@ -979,7 +962,7 @@ if(settings$generate.paper.figs) {
                                   get.legend(p.corr.neg.bench + theme(legend.position = "bottom")),
                                   layout_matrix=rbind(c(1,1,2,2,3,3), c(4,4,4,4,4,4)),
                                   heights = c(5,1))
-  grid.arrange(p.corr.neg.three)  # plot
+  grid.arrange(p.corr.neg.three)  # display plot
   
   
   ## Export Plots
@@ -1073,188 +1056,70 @@ if(settings$generate.paper.figs) {
 
 ## Correlation Frequency Plots
 
-### Subset for paper
-
-```{r generate.paper.figs.corr.density}
-if(settings$generate.paper.figs) {
-  # Co-expression models
-  bench.model <- DANA.bench$data.model
-  bench.norm.model <- DANA.bench$norm.models$benchmark.TMM
-  test.model <- DANA.test$data.model
-  test.norm.model1 <- DANA.test$norm.models$test.TMM
-  test.norm.model2 <- DANA.test$norm.models$test.TC
-  
-  # Set number of genes for negative correlation to minimum
-  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
-                            dim(bench.model$neg$corr)[1],
-                            dim(test.norm.model1$neg$corr)[1],
-                            dim(test.norm.model2$neg$corr)[1])
-  
-  # Subsetted correlation matrices
-  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.bench.norm1.neg <- bench.norm.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.test.norm1.neg <- test.norm.model1$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.test.norm2.neg <- test.norm.model2$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  
-  ## extract non-zero correlations
-  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
-  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg != 0]
-  nnz.corr.test.norm1.neg <- corr.test.norm1.neg[upper.tri(corr.test.norm1.neg)]
-  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg != 0]
-  nnz.corr.test.norm2.neg <- corr.test.norm2.neg[upper.tri(corr.test.norm2.neg)]
-  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg != 0]
-  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
-  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg != 0]
-  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
-  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg != 0]
-  
-  # Keep positive correlations
-  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
-  nnz.corr.test.norm1.neg <- nnz.corr.test.norm1.neg[nnz.corr.test.norm1.neg > 0]
-  nnz.corr.test.norm2.neg <- nnz.corr.test.norm2.neg[nnz.corr.test.norm2.neg > 0]
-  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
-  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
-  
-
-  
-  ## direct comparison of negative controls benchmark vs test vs test.norm1
-  neg.corr <- data.frame(
-    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
-                     rep("Mixed-batch", length(nnz.corr.test.neg)),
-                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)))),
-    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
-    )
-  
-  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
-    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
-    theme_classic() +
-    xlim(0, 1) +
-    scale_linetype_manual(values=c("solid", "solid", "twodash"))+
-    scale_color_manual(values=c('#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
-    theme(legend.position=c(0.9,0.9), 
-          legend.title=element_blank(),
-          legend.background=element_rect(fill=alpha('white', 0.5))) +
-    ylab("Frequency") +
-    xlab("Marginal correlation") +
-    ggtitle("Positive correlation among negative controls")
-  print(p.density.neg.nnz.freq)
-  
-  
-  ## direct comparison of negative controls Single-batch vs test vs test.norm1 vs test.norm2
-  neg.corr <- data.frame(
-    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
-                     rep("Mixed-batch", length(nnz.corr.test.neg)),
-                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)),
-                     rep("Mixed-batch (TC)", length(nnz.corr.test.norm2.neg)))),
-    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg, nnz.corr.test.norm2.neg))
-    )
-  # ttt <- data.frame(prop.table(table(method=neg.corr$control, corr=neg.corr$corr), 1))
-  
-  p.density.neg.nnz.freq <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
-    geom_freqpoly(binwidth=.05, alpha=.8, size=.9) +
-    theme_classic() +
-    xlim(0, 1) +
-    # scale_linetype_manual(values=c("twodash", "solid", "solid", "solid"))+
-    scale_color_manual(values=c('#e7298a','#1B9E77','#D95F02', '#7570B3')) + # First colors from rcolorbrewer set "Dark2"
-    theme(legend.position=c(0.9,0.86), 
-          legend.title=element_blank(),
-          legend.background=element_rect(fill=alpha('white', 0.5))) +
-    ylab("Frequency") +
-    xlab("Marginal correlation")#+ ggtitle("Positive correlation among negative controls")
-  print(p.density.neg.nnz.freq)
-  
-  
-  
-  # Additional Plot with normalized Single-batch
-  neg.corr <- data.frame(
-    control=factor(c(rep("Single-batch", length(nnz.corr.bench.neg)), 
-                     rep("Single-batch (TMM)", length(nnz.corr.bench.norm1.neg)),
-                     rep("Mixed-batch", length(nnz.corr.test.neg)),
-                     rep("Mixed-batch (TMM)", length(nnz.corr.test.norm1.neg)))),
-    corr=abs(c(nnz.corr.bench.neg, nnz.corr.bench.norm1.neg, nnz.corr.test.neg, nnz.corr.test.norm1.neg))
-    )
-  p.density.neg.nnz.freq.four <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
-    geom_freqpoly(binwidth=.05, alpha=.8, size=1) +
-    theme_classic() +
-    xlim(0, 1) +
-    theme(legend.position=c(0.9,0.9), 
-          legend.title=element_blank(),
-          legend.background=element_rect(fill=alpha('white', 0.5))) +
-    ylab("Frequency") +
-    xlab("Marginal correlation") +
-    scale_linetype_manual(values=c("solid", "twodash","solid", "twodash"))+
-    scale_color_manual(values=c('#1B9E77','#1B9E77','#D95F02','#D95F02')) + # First 2 colors from rcolorbrewer set "Dark2"
-    ggtitle("Positive correlation among negative controls")
-  print(p.density.neg.nnz.freq.four)
-  
-  
-  
-  if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq.pdf"), p.density.neg.nnz.freq, width = 5, height=4, device="pdf")
-    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq_WithBench.pdf"), p.density.neg.nnz.freq.four, width = 5, height=4, device="pdf")
-  }
-}
-```
-
-### All methods
-
 
 ```{r generate.paper.figs.corr.density.supplements}
 if(settings$generate.paper.figs) {
-  # Co-expression models
-  bench.model <- DANA.bench$data.model
-  test.model <- DANA.test$data.model
-  test.norm.model1 <- DANA.test$norm.models$test.TMM
-  test.norm.model2 <- DANA.test$norm.models$test.RUVs
+  models <- list(
+    "Single-batch" = DANA.bench$data.model,
+    "Mixed-batch" = DANA.test$data.model,
+    "Mixed-batch (TMM)" = DANA.test$norm.models$test.TMM,
+    "Mixed-batch (DESeq)" = DANA.test$norm.models$test.DESeq,
+    "Mixed-batch (PoissonSeq)" = DANA.test$norm.models$test.PoissonSeq,
+    "Mixed-batch (RUVg)" = DANA.test$norm.models$test.RUVg,
+    "Mixed-batch (RUVs)" = DANA.test$norm.models$test.RUVs,
+    "Mixed-batch (RUVr)" = DANA.test$norm.models$test.RUVr,
+    "Mixed-batch (TC)" = DANA.test$norm.models$test.TC,
+    "Mixed-batch (Med)" = DANA.test$norm.models$test.Med,
+    "Mixed-batch (UQ)" = DANA.test$norm.models$test.UQ,
+    "Mixed-batch (QN)" = DANA.test$norm.models$test.QN
+  )
   
-  # Set number of genes for negative correlation to minimum
-  num.genes.plot.neg <- min(dim(test.model$neg$corr)[1],
-                            dim(bench.model$neg$corr)[1],
-                            sapply(DANA.test$norm.models, function(x) dim(x$neg$corr)[1]))
+  # Set number of genes for negative correlation to minimum found
+  num.genes.plot <- min(sapply(models, function(x) dim(x$neg$corr)[1]))
   
   # Subsetted correlation matrices
-  corr.bench.neg <- bench.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.test.neg <- test.model$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg]
-  corr.test.norm.neg <- lapply(DANA.test$norm.models, function(x) x$neg$corr[1:num.genes.plot.neg, 1:num.genes.plot.neg])
+  corrs <- lapply(models, function(x) x$neg$corr[1:num.genes.plot, 1:num.genes.plot])
+  corrs <- lapply(corrs, function(x) x[upper.tri(x)])
   
-  ## Strictly positive correlations
-  nnz.corr.bench.neg <- corr.bench.neg[upper.tri(corr.bench.neg)]
-  nnz.corr.bench.neg <- nnz.corr.bench.neg[nnz.corr.bench.neg > 0]
-  nnz.corr.bench.norm1.neg <- corr.bench.norm1.neg[upper.tri(corr.bench.norm1.neg)]
-  nnz.corr.bench.norm1.neg <- nnz.corr.bench.norm1.neg[nnz.corr.bench.norm1.neg > 0]
-  nnz.corr.test.neg <- corr.test.neg[upper.tri(corr.test.neg)]
-  nnz.corr.test.neg <- nnz.corr.test.neg[nnz.corr.test.neg > 0]
-  nnz.corr.test.norm.neg <- lapply(corr.test.norm.neg, function(x) x[upper.tri(x)][x[upper.tri(x)] > 0])
-  names(nnz.corr.test.norm.neg) <- substr(names(nnz.corr.test.norm.neg), 6, 20)
-  
-  control <- c(rep("Single-batch", length(nnz.corr.bench.neg)), 
-                     rep("Mixed-batch", length(nnz.corr.test.neg)))
-  for(i in 1:length(nnz.corr.test.norm.neg)) {
-    control <- c(control, rep(paste0("Mixed-batch (", names(nnz.corr.test.norm.neg)[i],")"), length(nnz.corr.test.norm.neg[[i]])))
-  }
-  ## direct comparison of negative controls Single-batch vs test vs test.norm1
+  control <- factor(
+    as.vector(sapply(names(corrs), function(x) rep(x,length(corrs[[1]])))),
+    levels = names(models) 
+  )
   neg.corr <- data.frame(
     control=factor(control),
-    corr=abs(c(nnz.corr.bench.neg, nnz.corr.test.neg, unname(unlist(nnz.corr.test.norm.neg))))
-    )
+    corr=unname(unlist(corrs))
+  )
+  
+  # plot insert
+  p.insert <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
+    geom_vline(xintercept = 0, size=.4, color="gray80", linetype="solid") +
+    geom_freqpoly(binwidth=.05, alpha=.9, size=.3) +
+    theme_bw() +
+    xlim(-1, 1) +
+    scale_color_manual(values=brewer.pal(n=12, name="Paired")) +
+    theme(legend.position="none",
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank())
+  
   
   p.corr.frequency.neg.controls.all <- ggplot(neg.corr, aes(x=corr, colour=control, linetype=control)) +
-    geom_freqpoly(binwidth=.05, alpha=.9, size=.9) +
+    geom_vline(xintercept = 0, size=.4, color="gray80", linetype="solid") +
+    geom_freqpoly(binwidth=.05, alpha=.9, size=.75) +
     theme_classic() +
-    xlim(0, 1) +
-    scale_color_manual(values=brewer.pal(n=12, name="Paired")) + # First 2 colors from rcolorbrewer set "Dark2"
-    theme(legend.position=c(0.85,0.6), 
+    xlim(-1, 1) +
+    ylim(0,200) +
+    scale_color_manual(values=brewer.pal(n=12, name="Paired")) +
+    theme(legend.position=c(0.84,0.8), 
           legend.title=element_blank(),
           legend.background=element_rect(fill=alpha('white', 0.5))) +
     ylab("Frequency") +
-    xlab("Marginal correlation") + # ggtitle("Positive correlation among negative controls") + 
-    theme(legend.key.width = unit(2,"cm"))
+    xlab("Marginal correlation") + 
+    theme(legend.key.width = unit(2.4,"cm")) +
+    annotation_custom(ggplotGrob(p.insert), xmin=-1.1, xmax=-0.3, ymin=100, ymax=200)
   print(p.corr.frequency.neg.controls.all)
   
-  
   if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq_All.pdf"), p.corr.frequency.neg.controls.all, width = 8, height=5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_CorrDensityNeg_Freq_All.pdf"), p.corr.frequency.neg.controls.all, width = 8, height=8, device="pdf")
   }
 }
 ```
@@ -1263,44 +1128,6 @@ if(settings$generate.paper.figs) {
 
 ## Correlation Scatter Plots
 
-### Subset for paper
-
-```{r generate.paper.figs.corr.scatter}
-if(settings$generate.paper.figs) {
-  ## Generate correlation scatter plots for positive controls for TMM and UQ
-  par(mfrow=c(1,1))
-  
-  # un-normalized vs TMM
-  p.scatter.test.TMM <- plot.corr.scatter(
-    corr1=DANA.test$data.model$pos$corr, 
-    corr2=DANA.test$norm.models$test.TMM$pos$corr,
-    clusters=clusters.test,
-    title="Mixed-batch (TMM)",
-    xlab="un-normalized", 
-    ylab="TMM", 
-    threshold=0)
-  print(p.scatter.test.TMM)
-  # un-normalized vs RUVs
-  p.scatter.test.RUVs <- plot.corr.scatter(
-    corr1=DANA.test$data.model$pos$corr, 
-    corr2=DANA.test$norm.models$test.RUVs$pos$corr,
-    clusters=clusters.test,
-    title="Mixed-batch (RUVs)",
-    xlab="un-normalized", 
-    ylab="RUVs", 
-    threshold=0)
-  print(p.scatter.test.RUVs)
-  
-  # Save plots
-  if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_ScatterTMM.pdf"), p.scatter.test.TMM, width=4, height=4, device="pdf")
-    ggsave(paste0(settings$paper.fig.path, "UCEC_ScatterRUVs.pdf"), p.scatter.test.RUVs, width=4, height=4, device="pdf")
-    # ggsave(paste0(settings$paper.fig.path, "UCEC_CorrNeg.eps"), p.corr.neg, width = 8, height=3.5, device="eps")
-  }
-}
-```
-
-### All normalization methods for supplementary materials
 
 ```{r generate.paper.figs.corr.scatter.all}
 if(settings$generate.paper.figs) {
@@ -1400,55 +1227,53 @@ if(settings$generate.paper.figs) {
   test.DANA.metrics <- data.frame(
     method=substr(rownames(DANA.test$metrics), 6, 20),
     cc=DANA.test$metrics[, "cc"],
-    mcr=DANA.test$metrics[, "mcr"]
+    mscr=DANA.test$metrics[, "mscr"]
   )
   
-  p.metrics.test <- ggplot(test.DANA.metrics,aes(x=mcr,y=cc, label=method)) + 
+  p.metrics.test <- ggplot(test.DANA.metrics,aes(x=mscr,y=cc, label=method)) + 
     geom_point(alpha=.5) + #pos=position_jitter(width=0.001, seed=1),
     theme_classic() + 
-    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    xlab(TeX("$mscr^-$; Relative reduction of handling effects")) + 
     ylab(TeX("$cc^+$; Biological signal preservation")) + 
     geom_text_repel(aes(label = method), size=3, max.overlaps = Inf, min.segment.length = 0.2, force = 1, box.padding = 0.2) +
     # xlim(c(min(c(0, test.mposc.reduction)),max(test.mposc.reduction))) +
     scale_x_continuous(labels = scales::percent, limits=c(0,1.05), 
                        breaks = scales::pretty_breaks(n = 5)) +
     # ylim(c(0,1)) 
-    scale_y_continuous(labels = scales::percent, limits = c(0,1))
+    scale_y_continuous(labels = scales::percent, limits = c(0.5,1))
   print(p.metrics.test)
   
   print("DANA Statistics for mixed-batch data")
   test.DANA.metrics$cc <- round(test.DANA.metrics$cc,3)
-  test.DANA.metrics$mcr <- round(test.DANA.metrics$mcr,3)
+  test.DANA.metrics$mscr <- round(test.DANA.metrics$mscr,3)
   print(test.DANA.metrics)
   
   
   bench.DANA.metrics <- data.frame(
     method=substr(rownames(DANA.bench$metrics), 11, 30),
     cc=DANA.bench$metrics[, "cc"],
-    mcr=DANA.bench$metrics[, "mcr"]
+    mscr=DANA.bench$metrics[, "mscr"]
   )
   
-  p.metrics.bench <- ggplot(bench.DANA.metrics, aes(x=mcr, y=cc, label=method)) + 
+  p.metrics.bench <- ggplot(bench.DANA.metrics, aes(x=mscr, y=cc, label=method)) + 
     geom_point(alpha=.5) +
     theme_classic() + 
-    xlab(TeX("$mcr^-$; Relative reduction of handling effects")) + 
+    xlab(TeX("$mscr^-$; Relative reduction of handling effects")) + 
     ylab(TeX("$cc^+$; Biological signal preservation")) + 
     geom_text_repel(aes(label = method), size=3) +
-    # xlim(c(min(c(0,bench.mposc.reduction)),max(bench.mposc.reduction))) +
     scale_x_continuous(labels = scales::percent, limits=c(0, 1.05),
                        breaks = scales::pretty_breaks(n = 5)) +
-    # ylim(c(0,1))
-    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) 
+    scale_y_continuous(labels = scales::percent, limits = c(0.5, 1)) 
   print(p.metrics.bench)
   
   print("DANA Statistics for single-batch data")
   bench.DANA.metrics$cc <- round(bench.DANA.metrics$cc,3)
-  bench.DANA.metrics$mcr <- round(bench.DANA.metrics$mcr,3)
+  bench.DANA.metrics$mscr <- round(bench.DANA.metrics$mscr,3)
   print(bench.DANA.metrics)
   
   
   if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_MetricsTest.pdf"), p.metrics.test, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_MetricsTest.pdf"), p.metrics.test, width=5.5, height=4.5, device="pdf")
     ggsave(paste0(settings$paper.fig.path, "UCEC_MetricsBench.pdf"), p.metrics.bench, width=4.5, height=3.5, device="pdf")
   }
   
@@ -1468,7 +1293,7 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
       theme_classic() + 
       geom_point(alpha=.5) + 
       xlab("Sensitivity") + # True positive rate(1-FNR)
-      ylab("Precision") + # Positive predictive value (1-FDR)
+      ylab("Positive predictive value") + # Positive predictive value (1-FDR)
       geom_text_repel(aes(label = method), size=3, max.overlaps = Inf) + 
       scale_x_continuous(labels = scales::percent, limits=c(0,1),
                          breaks = scales::pretty_breaks(n = 4)) +
@@ -1491,7 +1316,7 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
   rm(d)
   
   if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_DEA_FNR_FDR.pdf"), p.test.DEA.FNR.FDR, width=4.5, height=3.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_DEA_FNR_FDR.pdf"), p.test.DEA.FNR.FDR, width=5.5, height=4.5, device="pdf")
     ggsave(paste0(settings$paper.fig.path, "UCEC_DEA_CAT.pdf"), p.test.DEA.CAT, width=4.5, height=3.5, device="pdf")
   }
 }
@@ -1504,18 +1329,22 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
   p.results.paper <- 
     plot_grid(p.RC.hist, 
               p.meanvar.test + labs(title = NULL),
-              p.metrics.test + ggtitle("DANA Metrics"),
-              p.test.DEA.FNR.FDR + ggtitle("Differential Expression Assessment"),
+              p.metrics.test,
+              p.test.DEA.FNR.FDR,
               align="hv",
               labels=c("a", "b", "c", "d"))
   plot(p.results.paper)
   
   
   if(settings$export.figures) {
-    ggsave(paste0(settings$paper.fig.path, "UCEC_Results.pdf"), p.results.paper, width=9, height=7.5, device="pdf")
+    ggsave(paste0(settings$paper.fig.path, "UCEC_Results.pdf"), p.results.paper, width=10, height=8.5, device="pdf")
   }
 }
 ```
+
+
+
+
 
 
 
@@ -1529,15 +1358,4 @@ if(settings$generate.paper.figs && settings$perform.DEA) {
 ```{r session.info}
 sessionInfo()
 ```
-
-
-
-
-
-
-
-
-
-
-
 
